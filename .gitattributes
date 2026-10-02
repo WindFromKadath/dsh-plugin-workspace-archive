@@ -1,0 +1,7 @@
+# 统一行尾（Windows 本地仓库，避免 CRLF/LF 噪音）
+* text=auto eol=lf
+
+# 二进制/证据文件不做行尾转换
+*.png binary
+*.zstd binary
+*.jsonl -text

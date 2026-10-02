@@ -1,0 +1,14 @@
+# Local environments and caches
+.venv/
+node_modules/
+__pycache__/
+.cache/
+.DS_Store
+Thumbs.db
+
+# 勘察用的一次性脚本与 asar 展开目录（体积大、可重建）
+.recon/
+
+# 运行产物
+*.log
+tmp/
