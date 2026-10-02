@@ -20,7 +20,8 @@
   "scripts": {
     "check": "node --check src/index.js",
     "test": "node --import ./test/register.mjs --test --test-isolation=none \"tests/*.test.mjs\"",
-    "test:isolated": "node --import ./test/register.mjs --test \"tests/*.test.mjs\""
+    "test:isolated": "node --import ./test/register.mjs --test \"tests/*.test.mjs\"",
+    "rm-test": "node --import ./test/register.mjs .verify/real-machine.mjs"
   },
   "dsh": {
     "bundle": {

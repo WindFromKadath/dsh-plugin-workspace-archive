@@ -1,0 +1,5 @@
+{
+  "name": "dsh-plugin-workspace-archive-rm-test",
+  "private": true,
+  "description": "真机测试用的最小 profile 配置目录（不是发布物）。"
+}

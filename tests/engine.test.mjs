@@ -42,6 +42,10 @@ function fakeWorld(options = {}) {
       },
       status: async () => (state.exists ? 'ok' : 'missing-dir')
     }],
+    /** 官方归档集合快照：引擎靠它区分「用户手动归档」与「本插件归档」。 */
+    get archivedSessionIds() {
+      return [...state.archived]
+    },
     async archiveSession(sessionId) {
       state.calls.push(['archive', sessionId])
       if (state.active.has(sessionId)) {
@@ -164,6 +168,30 @@ test('目录回归：只恢复本插件归档过的会话，用户手动归档�
   assert.deepEqual(world.state.calls, [['unarchive', 's1'], ['unarchive', 's2']])
   assert.equal(world.state.archived.has('user-manual-1'), true, '用户自己归档的会话必须原样保留')
   assert.deepEqual(ledger.entry('<repo>\\proj').archivedSessionIds, [], '恢复后台账归档清单清空')
+})
+
+test('回归：用户手动归档的**成员**不会被插件据为己有，也不会被恢复', async () => {
+  // 真机测试抓到的洞：官方 archiveSession 对已归档 id 幂等，若不先看官方归档集合，
+  // 插件会把用户手动归档的成员也记进自己台账，恢复时一并解除归档。
+  const world = fakeWorld({ archived: ['s2'] })
+  const { engine, ledger } = await makeEngine(world)
+
+  await engine.tick() // 健康轮：s1、s2 都是成员
+  assert.deepEqual(world.state.archived.has('s2'), true)
+
+  world.state.exists = false
+  await engine.tick()
+  await engine.tick()
+  await engine.tick()
+  assert.equal(world.state.archived.has('s1'), true, '插件应归档 s1')
+  assert.deepEqual(ledger.entry('<repo>\\proj').archivedSessionIds, ['s1'], '台账只能记自己归档的 s1')
+
+  world.state.exists = true
+  world.state.calls.length = 0
+  await engine.tick()
+
+  assert.deepEqual(world.state.calls, [['unarchive', 's1']])
+  assert.equal(world.state.archived.has('s2'), true, '用户手动归档的 s2 必须仍然归档')
 })
 
 test('dryRun：只记日志，不动注册表、不写台账', async () => {

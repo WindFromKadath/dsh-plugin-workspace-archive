@@ -151,16 +151,22 @@ export function createEngine(deps) {
 
   /**
    * 归档一批会话：官方调用**之前**先落台账（硬约束 2）。
+   * 执行前复核官方归档集合：已经被别人（用户自己/别的插件）归档的会话不是我们的账，
+   * 记进来就会在恢复时把用户的手动归档一并解除。真机测试抓到的就是这个洞。
    * @param action - policy 给出的动作。
    */
   async function runArchive(action) {
-    ledger.recordArchived(action.path, action.sessionIds)
+    const alreadyArchived = new Set(registry.archivedSessionIds ?? [])
+    const mine = action.sessionIds.filter((id) => !alreadyArchived.has(id))
+    if (mine.length === 0) return
+
+    ledger.recordArchived(action.path, mine)
     if (config.dryRun) {
-      logger?.info?.(`workspace-archive[dryRun]: 将归档 ${action.sessionIds.length} 个会话 @ ${action.path}`)
+      logger?.info?.(`workspace-archive[dryRun]: 将归档 ${mine.length} 个会话 @ ${action.path}`)
       return
     }
     await ledger.save()
-    for (const sessionId of action.sessionIds) {
+    for (const sessionId of mine) {
       try {
         await registry.archiveSession(sessionId)
         logger?.info?.(`workspace-archive: 已归档 ${sessionId}（${action.path} 目录缺失）`)
@@ -207,7 +213,9 @@ export function createEngine(deps) {
       observations,
       state: probeState,
       confirmations: config.missingConfirmations,
-      ledger
+      ledger,
+      // 官方归档集合的当前快照：用来区分「用户手动归档」和「本插件归档」。
+      alreadyArchived: new Set(registry.archivedSessionIds ?? [])
     })
     probeState = state
     for (const action of actions) {

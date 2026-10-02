@@ -1,0 +1,38 @@
+# 真机测试用最小组合（依据 @deepseek-ai/dsh-workspace README「最小组合」一节）
+# 只挂：会话 + 持久化 + 存储 + 存储域 + 工作区注册表 + 本插件。
+# 没有 webserver / agent-loop：不开端口、不调模型、跑完即退。
+
+- id: timer
+  name: '@deepseek-ai/cordis-plugin-timer'
+
+- id: session
+  name: '@deepseek-ai/dsh-session'
+
+- id: session-persistence-jsonl
+  name: '@deepseek-ai/dsh-session-persistence-jsonl'
+  config:
+    root: !!js dshHomePath('sessions')
+
+- id: storage
+  name: '@deepseek-ai/dsh-storage'
+
+- id: storage-json
+  name: '@deepseek-ai/dsh-storage-json'
+  config:
+    root: !!js dshHomePath('storages')
+
+- id: storage-domain
+  name: '@deepseek-ai/dsh-storage-domain'
+  config:
+    backend: json
+
+- id: workspace
+  name: '@deepseek-ai/dsh-workspace'
+
+- id: workspace-archive
+  name: dsh-plugin-workspace-archive
+  config:
+    dryRun: false
+    pollIntervalMs: 10000
+    missingConfirmations: 1
+    ledgerPath: !!js dshHomePath('workspace-archive', 'ledger.json')

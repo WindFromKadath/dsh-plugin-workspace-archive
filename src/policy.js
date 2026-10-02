@@ -23,11 +23,12 @@ export function createProbeState() {
 
 /**
  * 计算这一轮的动作。
- * @param options - 见模块注释。
+ * @param options - 见模块注释；`alreadyArchived` 是「官方归档集合的当前快照」。
  * @returns `{ actions, state }`（state 为新的去抖状态）。
  */
 export function evaluate(options) {
   const { observations, state, confirmations, ledger } = options
+  const alreadyArchived = options.alreadyArchived ?? new Set()
   const next = { missStreak: new Map(state?.missStreak ?? []) }
   const actions = []
 
@@ -53,7 +54,11 @@ export function evaluate(options) {
     if (streak < confirmations) continue // 还没确认，继续观察
 
     const pending = entry.archivedSessionIds ?? []
-    const candidates = (entry.sessionIds ?? []).filter((id) => !pending.includes(id))
+    // 已在官方归档集合里的会话**不是我们的账**：那是用户（或别的插件）手动归档的，
+    // 记进来就会在恢复时把它一并解除归档。官方 archiveSession 对已归档 id 是幂等的，
+    // 不复核这一点就永远发现不了。真机测试抓到的就是这个洞。
+    const candidates = (entry.sessionIds ?? [])
+      .filter((id) => !pending.includes(id) && !alreadyArchived.has(id))
     ledger.markMissing(path)
     if (candidates.length > 0) actions.push({ kind: 'archive', path, sessionIds: candidates })
   }
