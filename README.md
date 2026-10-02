@@ -29,7 +29,7 @@
 | 用途 | 实际命令或操作 |
 |---|---|
 | 准备环境 | 已建立：`package.json`（含 `dsh.bundle.patch`）+ `cordis.patch.yml` + `src/index.js`。**不需要 `pnpm install`**：`@deepseek-ai/*` 由宿主提供，本地测试用 `test/register.mjs` 解析钩子指向已安装的 profile。 |
-| 启动项目 | **已装入 desktop profile**（2026-10-02）：`node .verify/install-desktop.mjs` 建立了 junction `~\.dsh\profiles\desktop\node_modules\dsh-plugin-workspace-archive` → 本仓库，并在 profile 的用户 patch 层追加一条 `insert` 行（`dryRun: false`、`pollIntervalMs: 60000`、`missingConfirmations: 3`）。`cordis.patch.yml` 已备份为 `.bak-2026-10-02T05-28-53-108Z`。**待重启 DSH 生效**（实测 HMR 不会热装载 patch 层新增行）。回滚：`node .verify/install-desktop.mjs --uninstall`。 |
+| 启动项目 | **已装入 desktop profile**（2026-10-02，应用认得的形态）：`node .verify/install-desktop.mjs` 写入 ①`package.json` 的 `dependencies["dsh-plugin-workspace-archive"] = "link:…\\plugin-2"`（→ 插件页「已安装」列表读这里）②`dsh.profile.bundles` 追加本包名（→ 页面上那个启用开关）③`node_modules` junction ④patch 层按 id 覆盖配置（`dryRun: false`、60s×3）。备份：`package.json.bak-*-workspace-archive`、`cordis.patch.yml.bak-*-workspace-archive`。**待重启 DSH 生效**（实测 HMR 两次都不会热装载，等满 150/160 秒）。回滚：`node .verify/install-desktop.mjs --uninstall`。 |
 | 检查本轮改动 | `npm run check`（语法）；`npm test`（= `node --import ./test/register.mjs --test --test-isolation=none "tests/*.test.mjs"`，当前 **30 项通过**，含真 Cordis 上下文装载、端到端假注册表场景）。沙箱内必须用 `--test-isolation=none`：默认 runner 会以管道 stdio 起子进程，在 DSH 文件沙箱下报 `EPERM`；普通终端可用 `npm run test:isolated`。 |
 | 重现关键场景 | **已可一键重跑**：`npm run rm-test`（= `node --import ./test/register.mjs .verify/real-machine.mjs`）。它在工作区内的临时 `DSH_HOME`（`.verify/home`）里启动**真的 DSH 运行时**（真 Loader / 真会话持久化 / 真 storage-domain / 真工作区注册表），跑完整场景：建工作区 → 建两个真会话（A 交插件管，B 模拟用户手动归档）→ 删目录 → 断言 A 归档且 B 未被接管 → 放回目录 → 断言 A 恢复且 **B 仍然归档**。**当前 14/14 通过**，且会核对用户真实 `~/.dsh` 归档数未变（96→96）。**不碰 desktop profile、不碰真实工作区目录。** |
 
