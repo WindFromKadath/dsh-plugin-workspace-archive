@@ -60,7 +60,9 @@ export function evaluate(options) {
     const candidates = (entry.sessionIds ?? [])
       .filter((id) => !pending.includes(id) && !alreadyArchived.has(id))
     ledger.markMissing(path)
-    if (candidates.length > 0) actions.push({ kind: 'archive', path, sessionIds: candidates })
+    if (candidates.length > 0) {
+      actions.push({ kind: 'archive', path, sessionIds: candidates, reason: observation.reason ?? 'folder-missing' })
+    }
   }
 
   return { actions, state: next }

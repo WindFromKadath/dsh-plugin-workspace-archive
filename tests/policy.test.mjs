@@ -59,7 +59,7 @@ test('缺失要连续达到确认次数才归档（去抖）', () => {
     state = result.state
   }
   const third = evaluate({ observations: observation(false), state, confirmations: 3, ledger })
-  assert.deepEqual(third.actions, [{ kind: 'archive', path: '<repo>\\proj', sessionIds: ['s1', 's2'] }])
+  assert.deepEqual(third.actions, [{ kind: 'archive', path: '<repo>\\proj', sessionIds: ['s1', 's2'], reason: 'folder-missing' }])
 })
 
 test('缺失后恢复健康：重新达到确认次数才再次归档（去抖要复位）', () => {

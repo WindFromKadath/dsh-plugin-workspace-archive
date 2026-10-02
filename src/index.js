@@ -139,31 +139,46 @@ export function createEngine(deps) {
     }
   })
   let probeState = createProbeState()
+  /**
+   * 本进程里是否见过非空注册表。用来挡启动瞬态：注册表 bootstrap 未完成时
+   * `list()` 可能是空的，若据此判定"项目被移除"会误归档，所以没见过非空就一律不动。
+   */
+  let registryWasPopulated = false
 
   /**
-   * 读一次全量观察：注册表里的工作区 + 台账里独有的路径（已被移出注册表但目录可能回来）。
+   * 读一次全量观察：注册表里的工作区 + 台账里独有的路径。
+   *
+   * 台账独有路径 = **项目登记已从 DSH 移除**（`删除工作区` 菜单，文件夹通常还在）。
+   * 用户 2026-10-02 确认：这也算"消失"，要归档；同一目录再次被添加时恢复。
    * @returns observations 数组。
    */
   async function observe() {
     const observations = []
     const seen = new Set()
-    for (const workspace of registry.list()) {
+    const workspaces = registry.list()
+    if (workspaces.length > 0) registryWasPopulated = true
+    for (const workspace of workspaces) {
       const exists = (await workspace.status()) === 'ok'
       observations.push({
         path: workspace.path,
         title: workspace.title,
         sessionIds: [...workspace.sessionIds],
-        exists
+        exists,
+        reason: exists ? 'ok' : 'folder-missing'
       })
       seen.add(workspace.path.toLowerCase())
     }
     for (const entry of ledger.entries()) {
       if (seen.has(entry.path.toLowerCase())) continue
+      const folderExists = await statDirectory(entry.path)
       observations.push({
         path: entry.path,
         title: entry.title,
         sessionIds: [...(entry.sessionIds ?? [])],
-        exists: await statDirectory(entry.path)
+        // 登记没了就算消失（文件夹在不在都一样）；注册表还没见过非空时先按"存在"处理。
+        exists: registryWasPopulated === false,
+        reason: registryWasPopulated ? 'unregistered' : 'registry-not-ready',
+        folderExists
       })
     }
     return observations
@@ -179,17 +194,18 @@ export function createEngine(deps) {
     const alreadyArchived = new Set(registry.archivedSessionIds ?? [])
     const mine = action.sessionIds.filter((id) => !alreadyArchived.has(id))
     if (mine.length === 0) return
+    const why = action.reason === 'unregistered' ? '项目已从 DSH 移除' : '目录缺失'
 
     ledger.recordArchived(action.path, mine)
     if (config.dryRun) {
-      logger?.info?.(`workspace-archive[dryRun]: 将归档 ${mine.length} 个会话 @ ${action.path}`)
+      logger?.info?.(`workspace-archive[dryRun]: 将归档 ${mine.length} 个会话 @ ${action.path}（${why}）`)
       return
     }
     await ledger.save()
     for (const sessionId of mine) {
       try {
         await registry.archiveSession(sessionId)
-        logger?.info?.(`workspace-archive: 已归档 ${sessionId}（${action.path} 目录缺失）`)
+        logger?.info?.(`workspace-archive: 已归档 ${sessionId}（${action.path} ${why}）`)
       } catch (error) {
         if (isActiveSessionRefusal(error)) {
           // 会话还在跑：跳过，绝不强停用户正在进行的工作。

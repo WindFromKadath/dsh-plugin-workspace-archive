@@ -157,10 +157,28 @@ try {
   check('目录回归：用户手动归档的 B 仍然归档（关键安全断言）', archivedAfterReturn.has(sessionB) === true, { sessionB })
   check('目录回归：台账归档清单已清空', (ledgerAfterReturn.workspaces[entryKey]?.archivedSessionIds ?? []).length === 0)
 
+  // ── 阶段 5：菜单里的「删除工作区」（只删登记、目录仍在）→ 归档；重新添加 → 恢复 ──
+  await registry.delete(workspace.id)
+  const registryAfterProjectDelete = await readJson(registryFile)
+  const stillRegistered = Object.values(registryAfterProjectDelete.tables.workspaces)
+    .some((row) => row.path.toLowerCase() === entryKey)
+  check('删除项目：注册表里已无该项目，但目录仍然存在', stillRegistered === false && (await exists(projectDir)) === true)
+
+  await sleep(POLL_WAIT_MS)
+  const archivedAfterProjectDelete = new Set((await readJson(registryFile)).global.archivedSessionIds)
+  check('删除项目（目录仍在）：会话 A 被归档', archivedAfterProjectDelete.has(sessionA), { sessionA })
+  check('删除项目：用户手动归档的 B 不受影响', archivedAfterProjectDelete.has(sessionB) === true, { sessionB })
+
+  await registry.create(projectDir) // 重新添加同一目录（新记录、空成员）
+  await sleep(POLL_WAIT_MS)
+  const archivedAfterReadd = new Set((await readJson(registryFile)).global.archivedSessionIds)
+  check('重新添加目录：会话 A 自动恢复（靠台账交集，不靠新记录）', archivedAfterReadd.has(sessionA) === false, { sessionA })
+  check('重新添加目录：用户手动归档的 B 仍然归档', archivedAfterReadd.has(sessionB) === true, { sessionB })
+
   console.log('\n── 真实注册表（测试 DSH_HOME）──')
-  console.log(JSON.stringify({ archivedSessionIds: [...archivedAfterReturn] }, null, 2))
+  console.log(JSON.stringify({ archivedSessionIds: [...archivedAfterReadd] }, null, 2))
   console.log('── 台账 ──')
-  console.log(JSON.stringify(ledgerAfterReturn, null, 2))
+  console.log(JSON.stringify(await readJson(ledgerFile), null, 2))
 } finally {
   await ctx.fiber.dispose()
 }

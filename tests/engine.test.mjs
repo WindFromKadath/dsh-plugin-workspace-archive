@@ -208,30 +208,49 @@ test('dryRun：只记日志，不动注册表、不写台账', async () => {
   await assert.rejects(readFile(file, 'utf8'), /ENOENT/)
 })
 
-test('台账独有路径（已从注册表移除）：目录回来时也能恢复', async () => {
+test('「删除工作区」（项目登记被移除、目录仍在）→ 归档；重新添加同一目录 → 恢复', async () => {
+  // 用户 2026-10-02 确认的语义：菜单里的"删除工作区"只删登记、不动文件夹，
+  // 所以不能只看目录存在性——登记没了也算消失。
   const world = fakeWorld({ archived: [] })
-  const { engine, ledger, file } = await makeEngine(world)
-  await engine.tick()
-  world.state.exists = false
-  await engine.tick()
-  await engine.tick()
-  await engine.tick()
-  const archivedBefore = ledger.entry('<repo>\\proj').archivedSessionIds
-  assert.deepEqual(archivedBefore, ['s1', 's2'])
+  const listRegistered = world.registry.list
+  const { engine, ledger } = await makeEngine(world)
+  await engine.tick() // 健康轮：台账记下 s1、s2
+  assert.equal(world.state.exists, true, '整个用例里目录始终存在')
 
-  // 模拟用户把工作区从注册表移除、但目录又回来了：注册表为空，靠 stat 发现目录存在。
-  world.registry.list = () => []
-  const seen = []
-  const engine2 = createEngine({
+  world.registry.list = () => [] // 用户点「删除工作区」
+  await engine.tick()
+  await engine.tick()
+  await engine.tick()
+
+  assert.deepEqual(world.state.calls, [['archive', 's1'], ['archive', 's2']])
+  assert.deepEqual(ledger.entry('<repo>\\proj').archivedSessionIds, ['s1', 's2'])
+
+  // 重新添加同一目录：注册表又列出它 → 恢复台账交集
+  world.state.calls.length = 0
+  world.registry.list = listRegistered
+  await engine.tick()
+
+  assert.deepEqual(world.state.calls, [['unarchive', 's1'], ['unarchive', 's2']])
+  assert.deepEqual(ledger.entry('<repo>\\proj').archivedSessionIds, [])
+})
+
+test('启动瞬态保护：注册表从未非空时，不把台账路径当作「项目被移除」', async () => {
+  const world = fakeWorld()
+  world.registry.list = () => [] // 模拟注册表 bootstrap 尚未完成
+  await mkdir(tmpRoot, { recursive: true })
+  const dir = await mkdtemp(join(tmpRoot, 'engine-'))
+  const ledger = new LedgerStore(join(dir, 'ledger.json'))
+  ledger.syncHealthy('<repo>\\proj', 'proj', ['s1', 's2']) // 台账里有，但注册表没见过非空
+
+  const engine = createEngine({
     registry: world.registry,
     ledger,
     config: { pollIntervalMs: 60000, missingConfirmations: 3, dryRun: false },
-    logger: { info: (m) => seen.push(m), warn: (m) => seen.push(m) },
-    statDirectory: async () => true
+    logger: {}
   })
-  await engine2.tick()
+  await engine.tick()
+  await engine.tick()
+  await engine.tick()
 
-  assert.deepEqual(world.state.calls.slice(-2), [['unarchive', 's1'], ['unarchive', 's2']])
-  const onDisk = JSON.parse(await readFile(file, 'utf8'))
-  assert.deepEqual(onDisk.workspaces['<repo>\\proj'].archivedSessionIds, [])
+  assert.deepEqual(world.state.calls, [], '未见过非空注册表时不得据"登记消失"归档')
 })
