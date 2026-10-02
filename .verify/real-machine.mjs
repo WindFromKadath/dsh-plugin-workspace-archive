@@ -12,9 +12,9 @@
  * 用法：npm run rm-test   （= node --import ./test/register.mjs .verify/real-machine.mjs）
  */
 
-import { mkdir, readFile, rm, stat } from 'node:fs/promises'
+import { mkdir, readFile, rm, stat, symlink } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
@@ -59,6 +59,15 @@ async function userArchivedCount() {
 }
 
 process.env.DSH_HOME = home
+
+// 自链接：Loader 需要按**包名**解析到本仓库（`name: dsh-plugin-workspace-archive`）。
+// 目标在工作区内，沙箱允许；已存在就跳过。指向工作区外的 junction 会被沙箱拒绝，所以
+// `@deepseek-ai/*` 走 test/register.mjs 的解析钩子，而不是再建一个 junction。
+const selfLink = join(root, 'node_modules', 'dsh-plugin-workspace-archive')
+if ((await exists(selfLink)) === false) {
+  await mkdir(dirname(selfLink), { recursive: true })
+  await symlink(root, selfLink, 'junction')
+}
 
 // 干净起步
 await rm(home, { recursive: true, force: true })

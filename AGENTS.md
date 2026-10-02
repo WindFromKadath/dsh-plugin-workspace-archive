@@ -21,6 +21,7 @@
 - 运行时数据：`~/.dsh/sessions/--<slug>--/<sessionId>/session.v4.jsonl.zstd`（zstd **多帧**拼接，按 magic `28 b5 2f fd` 切帧）、`~/.dsh/storages/workspace.json`（`archivedSessionIds` 等）。**只读**。
 - 插件约定：`package.json` 必须声明 `dsh.bundle.patch`；客户端半用 `dsh.client`；兼容性用 `engines.dsh`。DSH 没有远程插件市场，分发即 npm registry。
 - 参考先例：`<branch-repo>`（`dsh-plugin-branch`，纯 JS 无构建链、79 项冒烟断言）——**只读**，可抄工程约定，不要改动它。
+- **真机验证装置**：`npm run rm-test`（`.verify/real-machine.mjs` + `.verify/rm/cordis.yml`）。它在 `.verify/home` 这个临时 `DSH_HOME` 里启动一个**真** DSH 运行时（真 Loader、真会话持久化、真 storage-domain、真工作区注册表），跑"建工作区→建真会话→删目录→验归档→放回目录→验恢复"全场景，并核对用户真实 `~/.dsh` 未被改动。`@deepseek-ai/*` 由 `test/register.mjs` 的解析钩子提供；`.verify/home`、`.verify/proj` 是一次性运行时（已 gitignore）。**这是做真机验证的首选方式：不改 desktop profile、不碰用户数据。**
 
 ## 危险操作边界（越界前必须先问用户）
 
