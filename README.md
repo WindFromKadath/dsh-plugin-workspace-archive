@@ -29,8 +29,9 @@
 | 用途 | 实际命令或操作 |
 |---|---|
 | 准备环境 | 已建立：`package.json`（含 `dsh.bundle.patch`）+ `cordis.patch.yml` + `src/index.js`。**不需要 `pnpm install`**：`@deepseek-ai/*` 由宿主提供，本地测试用 `test/register.mjs` 解析钩子指向已安装的 profile。 |
-| 启动项目 | **已装入 desktop profile**（2026-10-02，应用认得的形态）：`node .verify/install-desktop.mjs` 写入 ①`package.json` 的 `dependencies["dsh-plugin-workspace-archive"] = "link:…\\plugin-2"`（→ 插件页「已安装」列表读这里）②`dsh.profile.bundles` 追加本包名（→ 页面上那个启用开关）③`node_modules` junction ④patch 层按 id 覆盖配置（`dryRun: false`、60s×3）。备份：`package.json.bak-*-workspace-archive`、`cordis.patch.yml.bak-*-workspace-archive`。**待重启 DSH 生效**（实测 HMR 两次都不会热装载，等满 150/160 秒）。回滚：`node .verify/install-desktop.mjs --uninstall`。 |
-| 检查本轮改动 | `npm run check`（语法）；`npm test`（= `node --import ./test/register.mjs --test --test-isolation=none "tests/*.test.mjs"`，当前 **30 项通过**，含真 Cordis 上下文装载、端到端假注册表场景）。沙箱内必须用 `--test-isolation=none`：默认 runner 会以管道 stdio 起子进程，在 DSH 文件沙箱下报 `EPERM`；普通终端可用 `npm run test:isolated`。 |
+| 启动项目 | **已装入 desktop profile**（2026-10-02，应用认得的形态）：`node .verify/install-desktop.mjs` 写入 ①`package.json` 的 `dependencies["dsh-plugin-workspace-archive"] = "link:…\\plugin-2"`（→ 插件页「已安装」列表读这里）②`dsh.profile.bundles` 追加本包名（→ 页面上那个启用开关）③`node_modules` junction ④patch 层按 id 覆盖配置（`dryRun: false`、60s×3）。备份：`package.json.bak-*-workspace-archive`、`cordis.patch.yml.bak-*-workspace-archive`。**待重启 DSH 生效**（实测 HMR 从不热装载，三次共等 400+ 秒）。回滚：`node .verify/install-desktop.mjs --uninstall`。 |
+| 检查本轮改动 | `npm run check`（语法）；`npm test`（= `node --import ./test/register.mjs --test --test-isolation=none "tests/*.test.mjs"`，当前 **33 项通过**，含真 Cordis 上下文装载、端到端假注册表场景、以及"插件源码不得 import 宿主包"的回归断言）。沙箱内必须用 `--test-isolation=none`：默认 runner 会以管道 stdio 起子进程，在 DSH 文件沙箱下报 `EPERM`；普通终端可用 `npm run test:isolated`。 |
+| 诊断装载问题 | `node --import ./test/register.mjs .verify/diagnose-desktop-compose.mjs`：用 app-boot 自己的组合函数**只读**复现 desktop profile 的组合，打印每个 bundle 层、被跳过的 bundle 及原因、组合后有没有我们那一行。实测：7 层全部加载、0 跳过、195 条里含 `workspace-archive` ⇒ 组合层没问题，故障只可能在模块加载。 |
 | 重现关键场景 | **已可一键重跑**：`npm run rm-test`（= `node --import ./test/register.mjs .verify/real-machine.mjs`）。它在工作区内的临时 `DSH_HOME`（`.verify/home`）里启动**真的 DSH 运行时**（真 Loader / 真会话持久化 / 真 storage-domain / 真工作区注册表），跑完整场景：建工作区 → 建两个真会话（A 交插件管，B 模拟用户手动归档）→ 删目录 → 断言 A 归档且 B 未被接管 → 放回目录 → 断言 A 恢复且 **B 仍然归档**。**当前 14/14 通过**，且会核对用户真实 `~/.dsh` 归档数未变（96→96）。**不碰 desktop profile、不碰真实工作区目录。** |
 
 占位内容须先填好；尚无运行环境时，把验证状态记为待验证。
@@ -64,7 +65,8 @@
 | D005 | 2026-10-02 | 测试默认脚本加 `--test-isolation=none`：DSH 沙箱下默认 runner 的管道子进程会 `EPERM`；另留 `test:isolated` 供普通终端 | 本机实测（`npm test` 通过） | 已采纳 |
 | D006 | 2026-10-02 | 不 import `@deepseek-ai/dsh-workspace`（避免额外 peer）：活动拒绝按 `name/activity` 识别；定时器走可选 `ctx.get('timer')` 并把退化路径也纳入测试 | 真 Cordis 装载实测（直接读 `ctx.interval` 会抛 "cannot get property interval without inject"） | 已采纳 |
 | D007 | 2026-10-02 | 归档前必须复核官方 `registry.archivedSessionIds`，已在其中的会话**不得**记入本插件台账 | **真机测试抓到**：官方 `archiveSession` 对已归档 id 幂等，首轮真机把用户手动归档的成员也记成自己的账，恢复时把用户归档一并解除 | 已采纳（`81234e3`） |
-| D008 | 2026-10-02 | 装进 desktop profile 用「junction + profile 用户 patch 层 insert 行」；**不**改 app 自己管理的 `package.json` / `dsh.profile.bundles` | 本地 link 走不了 `dsh plugin --profile desktop`（launcher 明确拒绝 desktop profile）；patch 层是官方文档里应用在全部 bundle 层之上的用户层，也不会与 app 的 bundles 写入互相覆盖 | 已采纳（`--uninstall` 可回滚） |
+| D008 | 2026-10-02 | 装进 desktop profile 用「package.json 依赖 + bundles 开关 + junction + patch 层按 id 覆盖配置」；**不**改 app 自己管理的字段以外的东西 | 本地 link 走不了 `dsh plugin --profile desktop`（launcher 明确拒绝）；插件页「已安装」读的就是 `dependencies`，只建 junction 不会出现（第一版白装的教训） | 已采纳（`--uninstall` 可回滚） |
+| D009 | 2026-10-02 | 插件**零外部依赖**：不 import `@deepseek-ai/schemastery`（不再导出 `Config`）、不 import `dsh-home-paths`（自己按 `ctx.get('dshHomePath')` → `$DSH_HOME` → `~/.dsh` 解析） | **真机装载失败抓到**：junction 装载时 Node 按真实路径解析嵌套 import，够不到宿主包 → `ERR_MODULE_NOT_FOUND`。代价：没有 schemastery 的配置 schema（UI/config dump 不再列字段），校验与默认值由 `resolveConfig` 全权负责，已有测试覆盖 | 已采纳（`68bbe7f`） |
 
 **待确认**：重启 DSH 后，验收 `~\.dsh\workspace-archive\ledger.json` 是否出现（装载成功的可观察证据）；确认后再把 F002 收尾。
 
