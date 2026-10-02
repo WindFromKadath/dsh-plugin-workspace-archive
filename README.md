@@ -29,8 +29,8 @@
 | 用途 | 实际命令或操作 |
 |---|---|
 | 准备环境 | 已建立：`package.json`（含 `dsh.bundle.patch`）+ `cordis.patch.yml` + `src/index.js`。**不需要 `pnpm install`**：`@deepseek-ai/*` 由宿主提供，本地测试用 `test/register.mjs` 解析钩子指向已安装的 profile。 |
-| 启动项目 | 待用户批准（F002 剩余一半）：把本包 link 进 `$env:DSH_HOME\profiles\desktop` 后重启 DSH Desktop；装载成功以侧栏 Plugins 页或 `plugin_manager` 列表可见为准。**写 profile 属越界操作，需明确同意。** |
-| 检查本轮改动 | `npm run check`（语法）；`npm test`（= `node --import ./test/register.mjs --test --test-isolation=none "tests/*.test.mjs"`，当前 **29 项通过**，含真 Cordis 上下文装载、端到端假注册表场景）。沙箱内必须用 `--test-isolation=none`：默认 runner 会以管道 stdio 起子进程，在 DSH 文件沙箱下报 `EPERM`；普通终端可用 `npm run test:isolated`。 |
+| 启动项目 | **已装入 desktop profile**（2026-10-02）：`node .verify/install-desktop.mjs` 建立了 junction `~\.dsh\profiles\desktop\node_modules\dsh-plugin-workspace-archive` → 本仓库，并在 profile 的用户 patch 层追加一条 `insert` 行（`dryRun: false`、`pollIntervalMs: 60000`、`missingConfirmations: 3`）。`cordis.patch.yml` 已备份为 `.bak-2026-10-02T05-28-53-108Z`。**待重启 DSH 生效**（实测 HMR 不会热装载 patch 层新增行）。回滚：`node .verify/install-desktop.mjs --uninstall`。 |
+| 检查本轮改动 | `npm run check`（语法）；`npm test`（= `node --import ./test/register.mjs --test --test-isolation=none "tests/*.test.mjs"`，当前 **30 项通过**，含真 Cordis 上下文装载、端到端假注册表场景）。沙箱内必须用 `--test-isolation=none`：默认 runner 会以管道 stdio 起子进程，在 DSH 文件沙箱下报 `EPERM`；普通终端可用 `npm run test:isolated`。 |
 | 重现关键场景 | **已可一键重跑**：`npm run rm-test`（= `node --import ./test/register.mjs .verify/real-machine.mjs`）。它在工作区内的临时 `DSH_HOME`（`.verify/home`）里启动**真的 DSH 运行时**（真 Loader / 真会话持久化 / 真 storage-domain / 真工作区注册表），跑完整场景：建工作区 → 建两个真会话（A 交插件管，B 模拟用户手动归档）→ 删目录 → 断言 A 归档且 B 未被接管 → 放回目录 → 断言 A 恢复且 **B 仍然归档**。**当前 14/14 通过**，且会核对用户真实 `~/.dsh` 归档数未变（96→96）。**不碰 desktop profile、不碰真实工作区目录。** |
 
 占位内容须先填好；尚无运行环境时，把验证状态记为待验证。
@@ -64,8 +64,9 @@
 | D005 | 2026-10-02 | 测试默认脚本加 `--test-isolation=none`：DSH 沙箱下默认 runner 的管道子进程会 `EPERM`；另留 `test:isolated` 供普通终端 | 本机实测（`npm test` 通过） | 已采纳 |
 | D006 | 2026-10-02 | 不 import `@deepseek-ai/dsh-workspace`（避免额外 peer）：活动拒绝按 `name/activity` 识别；定时器走可选 `ctx.get('timer')` 并把退化路径也纳入测试 | 真 Cordis 装载实测（直接读 `ctx.interval` 会抛 "cannot get property interval without inject"） | 已采纳 |
 | D007 | 2026-10-02 | 归档前必须复核官方 `registry.archivedSessionIds`，已在其中的会话**不得**记入本插件台账 | **真机测试抓到**：官方 `archiveSession` 对已归档 id 幂等，首轮真机把用户手动归档的成员也记成自己的账，恢复时把用户归档一并解除 | 已采纳（`81234e3`） |
+| D008 | 2026-10-02 | 装进 desktop profile 用「junction + profile 用户 patch 层 insert 行」；**不**改 app 自己管理的 `package.json` / `dsh.profile.bundles` | 本地 link 走不了 `dsh plugin --profile desktop`（launcher 明确拒绝 desktop profile）；patch 层是官方文档里应用在全部 bundle 层之上的用户层，也不会与 app 的 bundles 写入互相覆盖 | 已采纳（`--uninstall` 可回滚） |
 
-**待你确认**：是否批准把本包 link 进 `$env:DSH_HOME\profiles\desktop` 以完成 F002 的真机装载验证（会写 profile 目录，属越界操作）。
+**待确认**：重启 DSH 后，验收 `~\.dsh\workspace-archive\ledger.json` 是否出现（装载成功的可观察证据）；确认后再把 F002 收尾。
 
 ## 给 Agent 的启动语
 
