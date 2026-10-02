@@ -1,6 +1,6 @@
 id,goal,acceptance,scope,status,evidence,verified_revision,verified_at
 F001,勘察官方能力与生态占位：需求①自动命名与需求②工作区归档恢复是否已被实现,两需求各有明确判定（①红海/②空白）且逐条带出处与链接,docs/recon/;.recon/asar.mjs,done,docs/recon/README.md + 01 + 02 + 03 + 03b + 04,DSH 0.2.0-rc.2 (asar build 04f392c9),2026-10-02
-F002,建立可被 DSH Desktop 装载的插件包骨架,plugin_manager 列表或侧栏 Plugins 页可见本插件且装载无错误; node --test 可跑通,package.json;cordis.patch.yml;src/index.js;tests/,todo,,,
+F002,建立可被 DSH Desktop 装载的插件包骨架,plugin_manager 列表或侧栏 Plugins 页可见本插件且装载无错误; node --test 可跑通,package.json;cordis.patch.yml;src/index.js;tests/,doing,npm test → 7 passed（仓库内验证）; 真机装载未见（需写 profile 属越界待批准）,bd6a668+working tree,2026-10-02
 F003,目录存在性探测与 sidecar 台账（path→sessionIds）,删除临时工作区目录后 60-90 秒内判定 missing 并落盘台账; 台账能在失效 id 被 registry prune 之前写入,src/probe.*;src/ledger.*,todo,,,
 F004,目录消失后自动归档该目录下由本插件登记的会话,会话进入已归档集合且默认视图隐藏; 运行中会话被拒时跳过而不是强停; 用户手动归档集合不被污染,src/archive.*,todo,,,
 F005,目录回归后按台账交集自动恢复会话,旧会话重新可见且可继续对话; 未被本插件归档的会话保持归档,src/restore.*,todo,,,

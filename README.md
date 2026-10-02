@@ -28,10 +28,10 @@
 
 | 用途 | 实际命令或操作 |
 |---|---|
-| 准备环境 | 待建立（F002）：`package.json`（含 `dsh.bundle.patch`）+ `cordis.patch.yml` + `src/index.js`；本机 pnpm shim 有已知问题，见 plugin-1 记录 |
-| 启动项目 | 待建立（F002）：link 进 `$env:DSH_HOME\profiles\desktop` 后重启 DSH Desktop；装载成功以 `plugin_manager` 列表/侧栏 Plugins 页可见为准 |
-| 检查本轮改动 | 待建立（F002）：`node --test tests/*.test.mjs`（纯 JS 无构建链，与 plugin-1 一致） |
-| 重现关键场景 | 待建立（F003–F005）：① 用临时目录 T 作为工作区，建 2 个会话（各留一条消息）② 关闭 DSH ③ 把 T 改名/删除 ④ 启动 DSH，等待去抖窗口，观察是否归档且**用户手动归档集合未被污染** ⑤ 把 T 改回原名 ⑥ 观察旧会话是否恢复 |
+| 准备环境 | 已建立：`package.json`（含 `dsh.bundle.patch`）+ `cordis.patch.yml` + `src/index.js`。**不需要 `pnpm install`**：`@deepseek-ai/*` 由宿主提供，本地测试用 `test/register.mjs` 解析钩子指向已安装的 profile。 |
+| 启动项目 | 待用户批准（F002 剩余一半）：把本包 link 进 `$env:DSH_HOME\profiles\desktop` 后重启 DSH Desktop；装载成功以侧栏 Plugins 页或 `plugin_manager` 列表可见为准。**写 profile 属越界操作，需明确同意。** |
+| 检查本轮改动 | `npm run check`（语法）；`npm test`（= `node --import ./test/register.mjs --test --test-isolation=none "tests/*.test.mjs"`，当前 7 项通过）。沙箱内必须用 `--test-isolation=none`：默认 runner 会以管道 stdio 起子进程，在 DSH 文件沙箱下报 `EPERM`；普通终端可用 `npm run test:isolated`。 |
+| 重现关键场景 | 待 F003–F005：① 用临时目录 T 作为工作区，建 2 个会话（各留一条消息）② 关闭 DSH ③ 把 T 改名/删除 ④ 启动 DSH，等待去抖窗口，观察是否归档且**用户手动归档集合未被污染** ⑤ 把 T 改回原名 ⑥ 观察旧会话是否恢复。**只能对一次性临时目录做，不得动真实工作区。** |
 
 占位内容须先填好；尚无运行环境时，把验证状态记为待验证。
 
@@ -60,8 +60,10 @@
 | D001 | 2026-10-02 | 项目骨架采用 `NewToLearn\AI协作SOP\项目模板\01-开发项目`（入口 README + AGENTS.md + tasks.csv + src/tests/artifacts），不另建并行文档体系 | 用户 2026-10-02 指令 | 已采纳 |
 | D002 | 2026-10-02 | 勘察阶段的所有结论放 `docs/recon/`，作为实现的设计依据；不复制进 README | [docs/recon/README.md](docs/recon/README.md)（Lead 复核） | 已采纳 |
 | D003 | 2026-10-02 | 归档必须先写 sidecar 台账再调 `archiveSession`，恢复只处理 sidecar 交集 | [02](docs/recon/02-workspace-session-archive.md) §硬约束 ③（`archivedSessionIds` 无来源标记） | 建议，待 F003 验证后转已采纳 |
+| D004 | 2026-10-02 | 本轮只做需求②；需求①不复刻，只保留评估结论（F006） | 用户 2026-10-02 选择确认 | 已采纳 |
+| D005 | 2026-10-02 | 测试默认脚本加 `--test-isolation=none`：DSH 沙箱下默认 runner 的管道子进程会 `EPERM`；另留 `test:isolated` 供普通终端 | 本机实测（`npm test` 7 项通过） | 已采纳 |
 
-**待你确认（尚未成为决策）**：本轮是否只做需求②；需求①是否保留“不实现、如需接入则评估现成插件”的结论。
+**待你确认**：是否批准把本包 link 进 `$env:DSH_HOME\profiles\desktop` 以完成 F002 的真机装载验证（会写 profile 目录，属越界操作）。
 
 ## 给 Agent 的启动语
 

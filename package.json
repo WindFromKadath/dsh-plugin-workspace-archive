@@ -1,0 +1,36 @@
+{
+  "name": "dsh-plugin-workspace-archive",
+  "version": "0.1.0",
+  "description": "DSH 插件：工作区目录消失时自动归档该目录下由本插件登记的会话，目录回归时按台账恢复（只走官方 workspaceRegistry API）。",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "check": "node --check src/index.js",
+    "test": "node --import ./test/register.mjs --test --test-isolation=none \"tests/*.test.mjs\"",
+    "test:isolated": "node --import ./test/register.mjs --test \"tests/*.test.mjs\""
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": ">=3.18.0 <4"
+  },
+  "devDependencies": {
+    "@deepseek-ai/schemastery": "3.18.4"
+  }
+}

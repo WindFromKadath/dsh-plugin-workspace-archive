@@ -1,0 +1,17 @@
+# dsh-plugin-workspace-archive — this bundle's patch layer.
+#
+# One host-side row today: the archive/restore policy engine.
+#   workspace-archive  watch registered workspaces; when a recorded directory
+#                      stops existing, archive the sessions this plugin had
+#                      registered for it; when the same path exists again,
+#                      restore exactly those sessions (never the user's own
+#                      manual archives).
+#
+# The row references this package by name so Node resolution finds the
+# installed code; behavior comes from ./src/index.js.
+#
+# F002 状态：骨架。apply() 只校验配置并记录一行日志，不注册定时器、不读写任何数据。
+
+- insert:
+    - id: workspace-archive
+      name: dsh-plugin-workspace-archive
