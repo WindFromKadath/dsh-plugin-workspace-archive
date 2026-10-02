@@ -23,8 +23,9 @@
  */
 
 import { stat } from 'node:fs/promises'
+import { watch as fsWatch } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 import { LedgerStore } from './ledger.js'
 import { createProbeState, evaluate } from './policy.js'
@@ -52,17 +53,24 @@ export const inject = ['workspaceRegistry']
 export function resolveConfig(config) {
   const raw = config ?? {}
   const resolved = {
-    pollIntervalMs: raw.pollIntervalMs ?? 60000,
-    missingConfirmations: raw.missingConfirmations ?? 3,
+    /** 兜底轮询间隔：事件驱动是主路径，轮询只防 watcher/事件漏报。 */
+    pollIntervalMs: raw.pollIntervalMs ?? 300000,
+    /** 发现消失后等多久再确认（毫秒）。0 = 发现即归档。 */
+    confirmDelayMs: raw.confirmDelayMs ?? 3000,
+    /** 是否给工作区目录的父目录挂 fs.watch（事件驱动的主要来源之一）。 */
+    watch: raw.watch ?? true,
     ledgerFile: raw.ledgerFile ?? 'ledger.json',
     ledgerPath: raw.ledgerPath ?? '',
     dryRun: raw.dryRun ?? true
   }
-  if (!Number.isSafeInteger(resolved.pollIntervalMs) || resolved.pollIntervalMs < 10000) {
-    throw new TypeError('workspace-archive config pollIntervalMs must be a safe integer >= 10000')
+  if (!Number.isSafeInteger(resolved.pollIntervalMs) || resolved.pollIntervalMs < 1000) {
+    throw new TypeError('workspace-archive config pollIntervalMs must be a safe integer >= 1000')
   }
-  if (!Number.isSafeInteger(resolved.missingConfirmations) || resolved.missingConfirmations < 1) {
-    throw new TypeError('workspace-archive config missingConfirmations must be a positive safe integer')
+  if (!Number.isSafeInteger(resolved.confirmDelayMs) || resolved.confirmDelayMs < 0) {
+    throw new TypeError('workspace-archive config confirmDelayMs must be a non-negative safe integer')
+  }
+  if (typeof resolved.watch !== 'boolean') {
+    throw new TypeError('workspace-archive config watch must be a boolean')
   }
   if (typeof resolved.ledgerFile !== 'string' || resolved.ledgerFile.length === 0) {
     throw new TypeError('workspace-archive config ledgerFile must be a non-empty string')
@@ -122,10 +130,11 @@ export function isActiveSessionRefusal(error) {
 }
 
 /**
- * 组装可测引擎：probe（读注册表 + 判存在）→ policy（决策）→ 执行（官方 API）。
+ * 组装可测引擎：probe（读注册表 + 判存在）→ policy（决策）→ 执行（官方 API），
+ * 外加两条**事件驱动**入口：注册表变更事件与目录 watcher，都汇到 `notifyChange()`。
  *
- * @param deps - 依赖注入，全部可替换。
- * @returns `{ tick }`。
+ * @param deps - 依赖注入，全部可替换（`watch`/`now`/`changeDelayMs` 便于测试）。
+ * @returns `{ tick, notifyChange, dispose }`。
  */
 export function createEngine(deps) {
   const { registry, ledger, config, logger } = deps
@@ -138,12 +147,23 @@ export function createEngine(deps) {
       return false
     }
   })
+  const watchImpl = deps.watch ?? fsWatch
+  const nowImpl = deps.now ?? (() => Date.now())
+  /** 事件合并窗口：同一瞬间的多个 fs 事件只跑一轮对账。 */
+  const changeDelayMs = deps.changeDelayMs ?? 25
+  /** 确认窗口到点后的跟进对账用（测试可注入假定时器）。 */
+  const timers = deps.timers ?? { setTimeout, clearTimeout }
   let probeState = createProbeState()
   /**
    * 本进程里是否见过非空注册表。用来挡启动瞬态：注册表 bootstrap 未完成时
    * `list()` 可能是空的，若据此判定"项目被移除"会误归档，所以没见过非空就一律不动。
    */
   let registryWasPopulated = false
+  /** parentDir → fs.FSWatcher。 */
+  const watchers = new Map()
+  let pendingTick = null
+  let confirmTimer = null
+  let disposed = false
 
   /**
    * 读一次全量观察：注册表里的工作区 + 台账里独有的路径。
@@ -242,13 +262,112 @@ export function createEngine(deps) {
     }
   }
 
+  /**
+   * 让 watcher 集合与"当前跟踪的路径"一致：每个工作区目录的**父目录**挂一个非递归 watcher，
+   * 目录被删/改名/重建时立刻收到事件。宿主对"目录消失"没有任何事件，这是唯一的事件源。
+   * 失效（网络盘、句柄上限、watcher error）只记日志并退回兜底轮询，绝不让插件失败。
+   * @param paths - 当前跟踪的工作区路径。
+   */
+  function reconcileWatchers(paths) {
+    if (config.watch === false || disposed) return
+    const wanted = new Map()
+    for (const path of paths) {
+      const parent = dirname(path)
+      const name = basename(path).toLowerCase()
+      if (!wanted.has(parent)) wanted.set(parent, new Set())
+      wanted.get(parent).add(name)
+    }
+    for (const [parent, watcher] of watchers) {
+      if (wanted.has(parent)) continue
+      try {
+        watcher.close()
+      } catch { /* 关闭失败无所谓 */ }
+      watchers.delete(parent)
+    }
+    for (const [parent, names] of wanted) {
+      if (watchers.has(parent)) continue
+      try {
+        const watcher = watchImpl(parent, { persistent: false }, (_eventType, filename) => {
+          // filename 为空时（部分平台/网络盘）保守地当作相关变化处理。
+          const changed = typeof filename === 'string' ? filename.toLowerCase() : undefined
+          if (changed === undefined || names.has(changed)) notifyChange()
+        })
+        watcher.on?.('error', (error) => {
+          logger?.warn?.(`workspace-archive: 目录监听失效，退回兜底轮询（${parent}）：${String(error)}`)
+          try {
+            watcher.close()
+          } catch { /* 已经坏了 */ }
+          watchers.delete(parent)
+        })
+        watchers.set(parent, watcher)
+      } catch (error) {
+        logger?.warn?.(`workspace-archive: 无法监听 ${parent}，退回兜底轮询：${String(error)}`)
+      }
+    }
+  }
+
+  /** 关掉所有 watcher 与跟进定时器（插件卸载时）。 */
+  function dispose() {
+    disposed = true
+    if (confirmTimer !== null) {
+      timers.clearTimeout(confirmTimer)
+      confirmTimer = null
+    }
+    for (const watcher of watchers.values()) {
+      try {
+        watcher.close()
+      } catch { /* 已经坏了 */ }
+    }
+    watchers.clear()
+  }
+
+  /**
+   * 确认窗口的跟进对账：事件只来一次，所以"开始计时"之后必须在窗口到点时再对账一次，
+   * 否则要等到兜底轮询（分钟级）才会真正归档。
+   */
+  function scheduleConfirm() {
+    if (disposed) return
+    const pending = probeState.missingSince.size > 0
+    if (pending && confirmTimer === null) {
+      confirmTimer = timers.setTimeout(() => {
+        confirmTimer = null
+        notifyChange()
+      }, Math.max(config.confirmDelayMs ?? 0, 0) + 50)
+      confirmTimer?.unref?.()
+    } else if (pending === false && confirmTimer !== null) {
+      timers.clearTimeout(confirmTimer)
+      confirmTimer = null
+    }
+  }
+
+  /**
+   * 事件入口：注册表变更事件与 watcher 事件都走这里，合并成一轮对账。
+   * @returns 本轮对账的 promise。
+   */
+  function notifyChange() {
+    if (disposed) return Promise.resolve([])
+    if (pendingTick !== null) return pendingTick
+    pendingTick = new Promise((resolve) => setTimeout(resolve, changeDelayMs))
+      .then(() => {
+        pendingTick = null
+        return tick()
+      })
+      .catch((error) => {
+        pendingTick = null
+        logger?.warn?.(`workspace-archive: 变更触发的对账失败：${String(error)}`)
+        return []
+      })
+    return pendingTick
+  }
+
   /** 跑一轮对账。 */
   async function tick() {
     const observations = await observe()
     const { actions, state } = evaluate({
       observations,
       state: probeState,
-      confirmations: config.missingConfirmations,
+      confirmDelayMs: config.confirmDelayMs,
+      now: nowImpl(),
       ledger,
       // 官方归档集合的当前快照：用来区分「用户手动归档」和「本插件归档」。
       alreadyArchived: new Set(registry.archivedSessionIds ?? [])
@@ -260,10 +379,12 @@ export function createEngine(deps) {
     }
     // 健康视图也要落盘：这就是「抢在官方 prune 之前」的那份记录。
     if (!config.dryRun && actions.every((action) => action.kind !== 'archive')) await ledger.save()
+    reconcileWatchers(observations.map((observation) => observation.path))
+    scheduleConfirm()
     return actions
   }
 
-  return { tick }
+  return { tick, notifyChange, dispose }
 }
 
 /**
@@ -291,7 +412,8 @@ export function scheduleInterval(ctx, run, intervalMs) {
 }
 
 /**
- * 装载插件：载入台账、立即对账一次、按间隔轮询。
+ * 装载插件：载入台账、立即对账一次，然后**事件驱动**（注册表变更事件 + 目录 watcher），
+ * 外加一个低频兜底轮询防漏。
  * @param ctx - Cordis 上下文（需要 `workspaceRegistry`；`logger`、`timer` 可选）。
  * @param config - 行配置。
  * @returns 引擎句柄（便于测试与手动触发 tick）。
@@ -309,12 +431,26 @@ export function apply(ctx, config) {
   }
 
   ledger.load().then(run, run)
+
+  // 事件源①：官方 storage 领域变更（新增/删除项目、排序、归档集合…）→ 秒级反应。
+  // 注册在插件自己的 fiber 作用域里，插件卸载时 Cordis 会一并清理。
+  if (typeof ctx?.on === 'function') {
+    ctx.on('domain/changed', () => engine.notifyChange())
+  }
+  // 事件源②：目录 watcher 在 tick 里按当前路径集合维护（reconcileWatchers）。
+
+  // 兜底：低频全量对账，防 watcher / 事件漏报。
   scheduleInterval(ctx, run, resolved.pollIntervalMs)
 
+  // 卸载时关掉 watcher。
+  if (typeof ctx?.effect === 'function') ctx.effect(() => () => engine.dispose(), 'workspace-archive.watchers')
+  else if (typeof ctx?.on === 'function') ctx.on('dispose', () => engine.dispose())
+
   ctx?.logger?.info?.(
-    'workspace-archive: 已装载'
-      + ` pollIntervalMs=${resolved.pollIntervalMs}`
-      + ` missingConfirmations=${resolved.missingConfirmations}`
+    'workspace-archive: 已装载（事件驱动 + 兜底轮询）'
+      + ` confirmDelayMs=${resolved.confirmDelayMs}`
+      + ` watch=${resolved.watch}`
+      + ` backstopPollMs=${resolved.pollIntervalMs}`
       + ` dryRun=${resolved.dryRun}`
       + ` ledger=${ledger.file}`
   )

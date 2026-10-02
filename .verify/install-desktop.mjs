@@ -50,14 +50,15 @@ const ledgerFile = join(dshHome, 'workspace-archive', 'ledger.json')
 
 const stamp = new Date().toISOString().replace(/[:.]/g, '-')
 
-/** patch 层里由本脚本管理的区域（真机启用：dryRun 关闭、60s×3 去抖）。 */
+/** patch 层里由本脚本管理的区域（真机启用：事件驱动 + 兜底轮询）。 */
 const MANAGED_BLOCK = `${START}
 - id: ${ROW_ID}
   name: ${PACKAGE_NAME}
   config:
     dryRun: false
-    pollIntervalMs: 60000
-    missingConfirmations: 3
+    confirmDelayMs: 3000
+    pollIntervalMs: 300000
+    watch: true
 ${END}
 `
 
@@ -173,19 +174,20 @@ if (hasDep === false || hasBundle === false) {
   console.log('package.json 已包含依赖与 bundle 选择，跳过。')
 }
 
-// 3) patch 层：同 id 覆盖配置（不动包默认值，也不重复插入行）
+// 3) patch 层：同 id 覆盖配置（不动包默认值，也不重复插入行）。已存在时按需**更新**。
 const current = await readFile(patchFile, 'utf8')
-if (current.includes(START)) {
-  console.log('patch 层的管理区域已存在，跳过。')
+const desired = `${stripManaged(current).replace(/\s*$/, '\n')}\n${MANAGED_BLOCK}`
+if (desired === current) {
+  console.log('patch 层的管理区域已是最新，跳过。')
 } else if (dryRun) {
-  console.log('[dry-run] 将在 patch 层追加管理区域（同 id 覆盖 config）')
+  console.log('[dry-run] 将写入 patch 层管理区域（同 id 覆盖 config）')
+  console.log(`        当前是否已有管理区域：${current.includes(START)}`)
 } else {
   const backup = `${patchFile}.bak-${stamp}-workspace-archive`
   await copyFile(patchFile, backup)
   console.log(`已备份：${backup}`)
-  const base = stripManaged(current).replace(/\s*$/, '\n')
-  await writeFile(patchFile, `${base}\n${MANAGED_BLOCK}`, 'utf8')
-  console.log('已在 patch 层追加管理区域（同 id 覆盖 config）。')
+  await writeFile(patchFile, desired, 'utf8')
+  console.log(current.includes(START) ? '已更新 patch 层的管理区域。' : '已在 patch 层追加管理区域（同 id 覆盖 config）。')
 }
 
 console.log(`

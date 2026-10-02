@@ -65,7 +65,7 @@ function fakeWorld(options = {}) {
   return { state, registry }
 }
 
-async function makeEngine(world, overrides = {}) {
+async function makeEngine(world, overrides = {}, deps = {}) {
   await mkdir(tmpRoot, { recursive: true })
   const dir = await mkdtemp(join(tmpRoot, 'engine-'))
   const file = join(dir, 'ledger.json')
@@ -75,11 +75,14 @@ async function makeEngine(world, overrides = {}) {
   const engine = createEngine({
     registry: world.registry,
     ledger,
-    config: { pollIntervalMs: 60000, missingConfirmations: 3, dryRun: false, ...overrides },
+    config: { pollIntervalMs: 300000, confirmDelayMs: 0, dryRun: false, ...overrides },
     logger: {
       info: (message) => logs.push(['info', message]),
       warn: (message) => logs.push(['warn', message])
-    }
+    },
+    // 测试里不自动跟进对账（那由专门的用例用假定时器验证），避免与手写 tick 竞争。
+    timers: { setTimeout: () => null, clearTimeout: () => {} },
+    ...deps
   })
   return { engine, ledger, file, logs }
 }
@@ -96,17 +99,22 @@ test('健康一轮：把成员记进台账，不动官方数据', async () => {
   assert.deepEqual(onDisk.workspaces['<repo>\\proj'].sessionIds, ['s1', 's2'])
 })
 
-test('缺失先去抖：前两轮不动，第三轮归档台账里的成员', async () => {
+test('确认窗口（时间型）：第一轮只计时，窗口到点后的下一轮才归档', async () => {
   const world = fakeWorld()
-  const { engine, file } = await makeEngine(world)
+  let clock = 1000
+  const { engine, file } = await makeEngine(world, { confirmDelayMs: 3000 }, { now: () => clock })
   await engine.tick()
 
   world.state.exists = false
   await engine.tick()
+  assert.deepEqual(world.state.calls, [], '第一次看到消失只开始计时')
+
+  clock = 2500 // 还在窗口内
   await engine.tick()
-  assert.deepEqual(world.state.calls, [], '未达确认次数不得归档')
+  assert.deepEqual(world.state.calls, [], '窗口内不得归档')
 
   // 关键：目录缺失后官方 sessionIds 已经为空，归档名单只能来自台账。
+  clock = 4500 // 已过 3 秒窗口
   await engine.tick()
   assert.deepEqual(world.state.calls, [['archive', 's1'], ['archive', 's2']])
   const onDisk = JSON.parse(await readFile(file, 'utf8'))
@@ -245,12 +253,92 @@ test('启动瞬态保护：注册表从未非空时，不把台账路径当作�
   const engine = createEngine({
     registry: world.registry,
     ledger,
-    config: { pollIntervalMs: 60000, missingConfirmations: 3, dryRun: false },
-    logger: {}
+    config: { pollIntervalMs: 300000, confirmDelayMs: 0, dryRun: false },
+    logger: {},
+    timers: { setTimeout: () => null, clearTimeout: () => {} }
   })
   await engine.tick()
   await engine.tick()
   await engine.tick()
 
   assert.deepEqual(world.state.calls, [], '未见过非空注册表时不得据"登记消失"归档')
+})
+
+test('事件入口：notifyChange() 会合并触发一轮对账（注册表事件走这里）', async () => {
+  const world = fakeWorld()
+  const { engine } = await makeEngine(world, { changeDelayMs: 0 })
+  await engine.tick() // 健康轮：台账记下成员
+
+  world.state.exists = false
+  await engine.notifyChange() // 第一次：只开始计时
+  await engine.notifyChange() // 第二次：confirmDelayMs=0 → 归档
+  assert.deepEqual(world.state.calls, [['archive', 's1'], ['archive', 's2']])
+})
+
+test('watcher 事件：目录被改名会触发对账（宿主对目录消失没有事件）', async () => {
+  const world = fakeWorld()
+  const watchers = []
+  const fakeWatch = (parent, _options, listener) => {
+    const watcher = { parent, listener, closed: false, on() {}, close() { this.closed = true } }
+    watchers.push(watcher)
+    return watcher
+  }
+  await mkdir(tmpRoot, { recursive: true })
+  const dir = await mkdtemp(join(tmpRoot, 'engine-'))
+  const ledger = new LedgerStore(join(dir, 'ledger.json'))
+  await ledger.load()
+  const engine = createEngine({
+    registry: world.registry,
+    ledger,
+    config: { pollIntervalMs: 300000, confirmDelayMs: 0, dryRun: false, watch: true },
+    logger: {},
+    watch: fakeWatch,
+    timers: { setTimeout: () => null, clearTimeout: () => {} },
+    changeDelayMs: 0
+  })
+
+  await engine.tick()
+  assert.equal(watchers.length, 1, '应给工作区目录的父目录挂一个 watcher')
+  assert.equal(watchers[0].parent.toLowerCase(), '<repo>')
+
+  world.state.exists = false
+  watchers[0].listener('rename', 'proj') // 目录被改名 → 触发对账
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  await engine.tick() // 第二次观察 → 归档（confirmDelayMs=0）
+
+  assert.deepEqual(world.state.calls, [['archive', 's1'], ['archive', 's2']])
+  engine.dispose()
+  assert.equal(watchers[0].closed, true, 'dispose 应关掉 watcher')
+})
+
+test('确认窗口的跟进对账：窗口到点会自己再跑一轮（否则要等兜底轮询）', async () => {
+  const world = fakeWorld()
+  await mkdir(tmpRoot, { recursive: true })
+  const dir = await mkdtemp(join(tmpRoot, 'engine-'))
+  const ledger = new LedgerStore(join(dir, 'ledger.json'))
+  await ledger.load()
+  const scheduled = []
+  const engine = createEngine({
+    registry: world.registry,
+    ledger,
+    config: { pollIntervalMs: 300000, confirmDelayMs: 3000, dryRun: false, watch: false },
+    logger: {},
+    timers: {
+      setTimeout: (fn, ms) => { scheduled.push({ fn, ms }); return { unref() {} } },
+      clearTimeout: () => {}
+    },
+    changeDelayMs: 0
+  })
+
+  await engine.tick() // 健康轮
+  world.state.exists = false
+  await engine.tick() // 第一次看到消失 → 开始计时并安排跟进
+
+  assert.equal(scheduled.length, 1, '开始计时后应安排一次跟进对账')
+  assert.equal(scheduled[0].ms, 3050, '跟进延迟 = 确认窗口 + 余量')
+
+  // 手工触发那次跟进：此时仍未过窗口（now 没变），不应归档
+  scheduled[0].fn()
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.deepEqual(world.state.calls, [], '跟进时若仍在窗口内则不动作')
 })

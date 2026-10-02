@@ -25,8 +25,11 @@ const ledgerFile = join(home, 'workspace-archive', 'ledger.json')
 const registryFile = join(home, 'storages', 'workspace.json')
 const userRegistryFile = join(process.env.USERPROFILE ?? '', '.dsh', 'storages', 'workspace.json')
 
-/** 插件轮询间隔是 10s，留足余量再读盘。 */
-const POLL_WAIT_MS = 14000
+/**
+ * 事件驱动档下的等待时间：watcher / domain 事件 → 合并窗口(25ms) → 首次对账 → 跟进对账(50ms)。
+ * 2 秒足够，也留出文件系统事件的余量。
+ */
+const POLL_WAIT_MS = 2000
 
 const report = { phases: [], checks: [] }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))

@@ -53,8 +53,9 @@ test('回归：插件源码不得 import 宿主包（否则 junction 装载会 E
 
 test('默认配置安全（dryRun），且可由 resolveConfig 归一化', () => {
   const parsed = resolveConfig({})
-  assert.equal(parsed.pollIntervalMs, 60000)
-  assert.equal(parsed.missingConfirmations, 3)
+  assert.equal(parsed.pollIntervalMs, 300000, '轮询只是兜底，主路径是事件驱动')
+  assert.equal(parsed.confirmDelayMs, 3000, '时间型确认窗口（毫秒）')
+  assert.equal(parsed.watch, true, '默认给工作区目录挂 watcher')
   assert.equal(parsed.ledgerFile, 'ledger.json')
   assert.equal(parsed.ledgerPath, '')
   assert.equal(parsed.dryRun, true, '默认必须是 dryRun，真机演练前不动数据')
@@ -76,13 +77,15 @@ test('resolveDshHome：优先宿主服务，其次 $DSH_HOME，最后 ~/.dsh', (
 })
 
 test('resolveConfig 拒绝越界值，并接受合法覆盖', () => {
-  assert.throws(() => resolveConfig({ pollIntervalMs: 1000 }), /pollIntervalMs/)
-  assert.throws(() => resolveConfig({ missingConfirmations: 0 }), /missingConfirmations/)
+  assert.throws(() => resolveConfig({ pollIntervalMs: 500 }), /pollIntervalMs/)
+  assert.throws(() => resolveConfig({ confirmDelayMs: -1 }), /confirmDelayMs/)
+  assert.throws(() => resolveConfig({ watch: 'yes' }), /watch/)
   assert.throws(() => resolveConfig({ ledgerFile: '' }), /ledgerFile/)
   assert.throws(() => resolveConfig({ dryRun: 'yes' }), /dryRun/)
-  assert.deepEqual(resolveConfig({ pollIntervalMs: 30000, missingConfirmations: 2, dryRun: false }), {
-    pollIntervalMs: 30000,
-    missingConfirmations: 2,
+  assert.deepEqual(resolveConfig({ pollIntervalMs: 60000, confirmDelayMs: 0, watch: false, dryRun: false }), {
+    pollIntervalMs: 60000,
+    confirmDelayMs: 0,
+    watch: false,
     ledgerFile: 'ledger.json',
     ledgerPath: '',
     dryRun: false

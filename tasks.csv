@@ -6,3 +6,4 @@ F004,目录消失后自动归档该目录下由本插件登记的会话,会话�
 F005,目录回归后按台账交集自动恢复会话,旧会话重新可见且可继续对话; 未被本插件归档的会话保持归档,src/index.js,done,真机 14/14：目录回归后A已恢复且B仍然归档；台账归档清单清空,81234e3,2026-10-02
 F006,需求①接入决策（默认不复刻）,给出结论与证据：默认不实现; 如需接入只评估现成插件（如 @weibaohui/dsh-smart-title）的兼容性与启用方式,docs/;tasks.csv,todo,docs/recon/README.md §2,,
 F007,把「删除工作区」（项目登记被移除、目录仍在）也当作消失信号并归档其会话,删除项目后其会话被归档（不再散成无项目）; 重新添加同一目录后自动恢复; 用户手动归档不受影响; 启动瞬态不误判,src/index.js;src/policy.js,done,仓库级 34 项; 真机 19/19（新增阶段5：registry.delete→归档、registry.create→恢复）; 启动瞬态保护有专门用例,.verify/real-machine.mjs,working tree @2026-10-02,2026-10-02
+F008,反应模型改为事件驱动（domain/changed + fs.watch）与时间型确认,登记/目录变化后秒级反应; 确认窗口内抖动不误判; 事件漏报时有兜底轮询; watcher/report 失效不导致插件失败,src/index.js;src/policy.js;.verify/rm/cordis.yml,done,仓库级 39 项（事件入口/watcher/跟进对账各有用例）; 真机 19/19（事件驱动档 confirmDelayMs=0 整轮数秒）; 轮询从 60s 降到 300s 兜底,working tree @2026-10-02,2026-10-02

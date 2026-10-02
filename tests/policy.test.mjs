@@ -1,5 +1,5 @@
 /**
- * 决策层测试（纯函数）：去抖、只在确认缺失后归档、恢复只处理台账交集。
+ * 决策层测试（纯函数）：时间型确认窗口、只在确认后归档、恢复只处理台账交集。
  */
 
 import { test } from 'node:test'
@@ -39,66 +39,97 @@ function fakeLedger(entries = {}) {
   }
 }
 
-const observation = (exists) => [{ path: '<repo>\\proj', title: 'proj', sessionIds: ['s1', 's2'], exists }]
+const observation = (exists, reason) => [
+  { path: '<repo>\\proj', title: 'proj', sessionIds: ['s1', 's2'], exists, reason }
+]
+
+/** 先健康一轮建立台账条目（真机里目录存在时才记成员）。 */
+function seed(ledger) {
+  return evaluate({ observations: observation(true), state: createProbeState(), confirmDelayMs: 0, now: 0, ledger }).state
+}
 
 test('目录健康：只同步成员，不产生动作', () => {
   const ledger = fakeLedger()
-  const { actions } = evaluate({ observations: observation(true), state: createProbeState(), confirmations: 3, ledger })
+  const { actions } = evaluate({ observations: observation(true), state: createProbeState(), confirmDelayMs: 0, now: 0, ledger })
   assert.deepEqual(actions, [])
   assert.deepEqual(ledger.data.get('<repo>\\proj').sessionIds, ['s1', 's2'])
 })
 
-test('缺失要连续达到确认次数才归档（去抖）', () => {
+test('时间型确认：第一次看到消失只开始计时，窗口到点才归档', () => {
   const ledger = fakeLedger()
-  let state = createProbeState()
-  // 先健康一轮建立台账条目（真机里目录存在时才记成员）。
-  state = evaluate({ observations: observation(true), state, confirmations: 3, ledger }).state
-  for (const expected of [[], []]) {
-    const result = evaluate({ observations: observation(false), state, confirmations: 3, ledger })
-    assert.deepEqual(result.actions, expected)
-    state = result.state
-  }
-  const third = evaluate({ observations: observation(false), state, confirmations: 3, ledger })
-  assert.deepEqual(third.actions, [{ kind: 'archive', path: '<repo>\\proj', sessionIds: ['s1', 's2'], reason: 'folder-missing' }])
+  let state = seed(ledger)
+
+  // t=1000：第一次看到消失 → 只记时间，不动手
+  let result = evaluate({ observations: observation(false, 'folder-missing'), state, confirmDelayMs: 3000, now: 1000, ledger })
+  assert.deepEqual(result.actions, [])
+  state = result.state
+
+  // t=2000：还在窗口内 → 仍不动手
+  result = evaluate({ observations: observation(false, 'folder-missing'), state, confirmDelayMs: 3000, now: 2000, ledger })
+  assert.deepEqual(result.actions, [])
+  state = result.state
+
+  // t=4000：已过 3 秒窗口 → 归档
+  result = evaluate({ observations: observation(false, 'folder-missing'), state, confirmDelayMs: 3000, now: 4000, ledger })
+  assert.deepEqual(result.actions, [
+    { kind: 'archive', path: '<repo>\\proj', sessionIds: ['s1', 's2'], reason: 'folder-missing' }
+  ])
 })
 
-test('缺失后恢复健康：重新达到确认次数才再次归档（去抖要复位）', () => {
+test('确认窗口内目录回来了：计时清零，不会因旧计时立刻归档', () => {
   const ledger = fakeLedger()
-  let state = createProbeState()
-  // 先健康一轮：台账条目只会在健康时建立（真机同样如此）。
-  state = evaluate({ observations: observation(true), state, confirmations: 3, ledger }).state
-  for (let i = 0; i < 3; i++) {
-    state = evaluate({ observations: observation(false), state, confirmations: 3, ledger }).state
-  }
-  ledger.recordArchived('<repo>\\proj', ['s1', 's2'])
-  // 目录回来一次 → 恢复动作 + 去抖归零
-  const back = evaluate({ observations: observation(true), state, confirmations: 3, ledger })
-  assert.deepEqual(back.actions, [{ kind: 'unarchive', path: '<repo>\\proj', sessionIds: ['s1', 's2'] }])
-  // 马上又消失一次：不应立刻归档
-  const gone = evaluate({ observations: observation(false), state: back.state, confirmations: 3, ledger })
-  assert.deepEqual(gone.actions, [])
+  let state = seed(ledger)
+  state = evaluate({ observations: observation(false), state, confirmDelayMs: 3000, now: 1000, ledger }).state
+  state = evaluate({ observations: observation(true), state, confirmDelayMs: 3000, now: 1500, ledger }).state
+  assert.equal(state.missingSince.size, 0, '回来即清零')
+
+  // 立刻又消失：重新开始计时（2000），t=4500 还不够 3 秒
+  const again = evaluate({ observations: observation(false), state, confirmDelayMs: 3000, now: 2000, ledger })
+  assert.deepEqual(again.actions, [])
+  const early = evaluate({ observations: observation(false), state: again.state, confirmDelayMs: 3000, now: 4500, ledger })
+  assert.deepEqual(early.actions, [])
+  const late = evaluate({ observations: observation(false), state: again.state, confirmDelayMs: 3000, now: 5100, ledger })
+  assert.equal(late.actions.length, 1)
+})
+
+test('confirmDelayMs = 0：第二次看到消失即归档（发现即归档）', () => {
+  const ledger = fakeLedger()
+  let state = seed(ledger)
+  state = evaluate({ observations: observation(false), state, confirmDelayMs: 0, now: 0, ledger }).state
+  const second = evaluate({ observations: observation(false), state, confirmDelayMs: 0, now: 0, ledger })
+  assert.deepEqual(second.actions, [
+    { kind: 'archive', path: '<repo>\\proj', sessionIds: ['s1', 's2'], reason: 'folder-missing' }
+  ])
+})
+
+test('登记被移除（reason=unregistered）同样归档，并带上原因', () => {
+  const ledger = fakeLedger()
+  let state = seed(ledger)
+  state = evaluate({ observations: observation(false, 'unregistered'), state, confirmDelayMs: 0, now: 0, ledger }).state
+  const second = evaluate({ observations: observation(false, 'unregistered'), state, confirmDelayMs: 0, now: 0, ledger })
+  assert.deepEqual(second.actions, [
+    { kind: 'archive', path: '<repo>\\proj', sessionIds: ['s1', 's2'], reason: 'unregistered' }
+  ])
 })
 
 test('目录回归：只恢复本插件归档过的交集，不碰用户手动归档', () => {
   const ledger = fakeLedger({ '<repo>\\proj': { path: '<repo>\\proj', title: 'proj', sessionIds: [], missingSince: 'T', archivedSessionIds: ['s1'] } })
-  const { actions } = evaluate({ observations: observation(true), state: createProbeState(), confirmations: 3, ledger })
+  const { actions } = evaluate({ observations: observation(true), state: createProbeState(), confirmDelayMs: 0, now: 0, ledger })
   assert.deepEqual(actions, [{ kind: 'unarchive', path: '<repo>\\proj', sessionIds: ['s1'] }])
 })
 
 test('从未健康过的目录：没有台账就不动作（不认识那些 id）', () => {
   const ledger = fakeLedger()
-  const { actions } = evaluate({ observations: observation(false), state: createProbeState(), confirmations: 1, ledger })
-  assert.deepEqual(actions, [])
+  let result = evaluate({ observations: observation(false), state: createProbeState(), confirmDelayMs: 0, now: 0, ledger })
+  result = evaluate({ observations: observation(false), state: result.state, confirmDelayMs: 0, now: 10, ledger })
+  assert.deepEqual(result.actions, [])
 })
 
 test('已归档的会话不会重复归档', () => {
   const ledger = fakeLedger()
-  let state = createProbeState()
-  state = evaluate({ observations: observation(true), state, confirmations: 3, ledger }).state
-  for (let i = 0; i < 3; i++) {
-    state = evaluate({ observations: observation(false), state, confirmations: 3, ledger }).state
-  }
+  let state = seed(ledger)
+  state = evaluate({ observations: observation(false), state, confirmDelayMs: 0, now: 0, ledger }).state
   ledger.recordArchived('<repo>\\proj', ['s1', 's2'])
-  const again = evaluate({ observations: observation(false), state, confirmations: 3, ledger })
+  const again = evaluate({ observations: observation(false), state, confirmDelayMs: 0, now: 0, ledger })
   assert.deepEqual(again.actions, [])
 })

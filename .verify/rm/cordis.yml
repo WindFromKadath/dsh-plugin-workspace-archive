@@ -33,6 +33,8 @@
   name: dsh-plugin-workspace-archive
   config:
     dryRun: false
-    pollIntervalMs: 10000
-    missingConfirmations: 1
+    # 事件驱动档：发现即归档（两次观察之间隔一次跟进对账），轮询只当兜底。
+    confirmDelayMs: 0
+    pollIntervalMs: 300000
+    watch: true
     ledgerPath: !!js dshHomePath('workspace-archive', 'ledger.json')
