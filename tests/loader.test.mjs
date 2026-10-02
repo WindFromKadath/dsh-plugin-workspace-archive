@@ -8,7 +8,8 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { mkdir, mkdtemp } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -19,6 +20,7 @@ import { scheduleInterval } from '../src/index.js'
 const tmpRoot = fileURLToPath(new URL('./.tmp/', import.meta.url))
 
 async function ledgerPath(name) {
+  await mkdir(tmpRoot, { recursive: true })
   const dir = await mkdtemp(join(tmpRoot, `${name}-`))
   return join(dir, 'ledger.json')
 }
@@ -46,6 +48,21 @@ test('真 Cordis 上下文能装载本插件（inject + Config + apply 全通）
   await new Promise((resolve) => setTimeout(resolve, 50))
 
   assert.ok(state.listCalls >= 1, 'apply 之后应至少跑过一轮对账')
+})
+
+test('真 Cordis 装载：没有 schemastery Config 时，行 config 依然传到 apply', async () => {
+  // 本插件为了能被 junction 装载而不导出 Config（零外部依赖）。这里证明 loader 仍然
+  // 把行上的 config 原样交给 apply：dryRun:false + ledgerPath 生效 ⇒ 第一轮就落盘台账。
+  const { registry } = fakeRegistry()
+  const root = new Context()
+  root.provide('workspaceRegistry', registry)
+  root.provide('timer', { interval: () => ({ dispose() {} }) })
+  const file = await ledgerPath('config-pass')
+
+  await root.plugin(plugin, { dryRun: false, pollIntervalMs: 10000, ledgerPath: file, missingConfirmations: 1 })
+  await new Promise((resolve) => setTimeout(resolve, 80))
+
+  assert.equal(existsSync(file), true, 'config 里的 ledgerPath + dryRun:false 应生效')
 })
 
 test('timer 服务缺失时退化为全局定时器，并在 dispose 时清理', () => {

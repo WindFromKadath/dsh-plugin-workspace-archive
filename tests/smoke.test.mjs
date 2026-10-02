@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-import { apply, Config, inject, isActiveSessionRefusal, name, resolveConfig } from '../src/index.js'
+import { apply, inject, isActiveSessionRefusal, name, resolveConfig, resolveDshHome } from '../src/index.js'
 
 const root = new URL('../', import.meta.url)
 
@@ -34,20 +34,45 @@ function stubContext(options = {}) {
   }
 }
 
-test('loader 契约：name / inject / Config 形态正确', () => {
+test('loader 契约：name / inject 形态正确，且**不导出** schemastery Config', () => {
   assert.equal(name, 'dsh-plugin-workspace-archive')
   assert.deepEqual(inject, ['workspaceRegistry'])
-  assert.equal(typeof Config, 'function', 'Config 必须是 schemastery schema（可调用）')
   assert.equal(typeof apply, 'function')
 })
 
-test('Config 空配置可归一化，且默认安全（dryRun）', () => {
-  const parsed = Config({})
+test('回归：插件源码不得 import 宿主包（否则 junction 装载会 ERR_MODULE_NOT_FOUND）', () => {
+  // 真机教训：profile 里用 junction 指向本仓库时，Node 按真实路径解析嵌套 import，
+  // 够不到宿主的 @deepseek-ai/*，插件在 DSH 里直接装载失败（组合正常、模块加载报错）。
+  for (const file of ['src/index.js', 'src/ledger.js', 'src/policy.js']) {
+    const source = readFileSync(fileURLToPath(new URL(file, root)), 'utf8')
+    const bare = source.match(/from\s+'(@?[^.'][^']*)'/g) ?? []
+    const external = bare.filter((clause) => /from\s+'(?!node:)/.test(clause))
+    assert.deepEqual(external, [], `${file} 只允许 node: 内置模块与相对路径 import`)
+  }
+})
+
+test('默认配置安全（dryRun），且可由 resolveConfig 归一化', () => {
+  const parsed = resolveConfig({})
   assert.equal(parsed.pollIntervalMs, 60000)
   assert.equal(parsed.missingConfirmations, 3)
   assert.equal(parsed.ledgerFile, 'ledger.json')
   assert.equal(parsed.ledgerPath, '')
   assert.equal(parsed.dryRun, true, '默认必须是 dryRun，真机演练前不动数据')
+})
+
+test('resolveDshHome：优先宿主服务，其次 $DSH_HOME，最后 ~/.dsh', () => {
+  const original = process.env.DSH_HOME
+  try {
+    process.env.DSH_HOME = '<repo>\\tmp-home'
+    assert.equal(resolveDshHome(undefined), '<repo>\\tmp-home')
+    const ctx = { get: (key) => (key === 'dshHomePath' ? () => '<repo>\\from-ctx' : undefined) }
+    assert.equal(resolveDshHome(ctx), '<repo>\\from-ctx')
+    delete process.env.DSH_HOME
+    assert.match(resolveDshHome(undefined), /\.dsh$/)
+  } finally {
+    if (original === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = original
+  }
 })
 
 test('resolveConfig 拒绝越界值，并接受合法覆盖', () => {

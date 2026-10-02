@@ -23,8 +23,8 @@
  */
 
 import { stat } from 'node:fs/promises'
-import z from '@deepseek-ai/schemastery'
-import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 
 import { LedgerStore } from './ledger.js'
 import { createProbeState, evaluate } from './policy.js'
@@ -35,19 +35,14 @@ export const name = 'dsh-plugin-workspace-archive'
 /** 需要的宿主服务：工作区注册表是归档/恢复的唯一官方入口。 */
 export const inject = ['workspaceRegistry']
 
-/** 配置（`cordis.patch.yml` 里 `workspace-archive` 行的 `config:`）。 */
-export const Config = z.object({
-  /** 轮询间隔（毫秒）；目录消失没有事件，只能定时对账。 */
-  pollIntervalMs: z.number().step(1000).min(10000).default(60000),
-  /** 连续多少次探测到缺失才判定 missing（抗重命名/同步抖动）。 */
-  missingConfirmations: z.number().step(1).min(1).default(3),
-  /** sidecar 文件名（相对 `$DSH_HOME/workspace-archive/`）。 */
-  ledgerFile: z.string().default('ledger.json'),
-  /** 显式台账绝对路径；留空则用 `$DSH_HOME/workspace-archive/<ledgerFile>`。 */
-  ledgerPath: z.string().default(''),
-  /** true 时只记录将要做的动作，不调官方归档/恢复、不写台账（首次真机演练）。 */
-  dryRun: z.boolean().default(true)
-})
+/**
+ * 配置（`cordis.patch.yml` 里 `workspace-archive` 行的 `config:`）。
+ *
+ * 这里**故意不导出 schemastery 的 `Config`**：本插件要能被 junction 装载，而
+ * Node 按真实路径解析嵌套 import 时够不到宿主的 `@deepseek-ai/*`（实测：
+ * 装载报 ERR_MODULE_NOT_FOUND: @deepseek-ai/schemastery）。所以本插件零外部依赖，
+ * 配置校验与默认值全部由下面的 `resolveConfig` 负责。
+ */
 
 /**
  * 即使 apply 被 Loader 之外的调用方直接调用也校验一遍配置。
@@ -82,13 +77,38 @@ export function resolveConfig(config) {
 }
 
 /**
+ * 解析 DSH 主目录。优先用宿主提供的 `dshHomePath` 服务（boot 会在根上下文提供它），
+ * 否则退回 `$DSH_HOME`，最后是 `~/.dsh`。**不 import `@deepseek-ai/dsh-home-paths`**：
+ * 那会让插件在 junction 装载下解析不到宿主包（见文件头注释）。
+ * @param ctx - Cordis 上下文（可为 undefined）。
+ * @returns 主目录绝对路径。
+ */
+export function resolveDshHome(ctx) {
+  let provided
+  try {
+    provided = typeof ctx?.get === 'function' ? ctx.get('dshHomePath') : undefined
+  } catch {
+    provided = undefined // 取服务失败不该让插件装载失败
+  }
+  if (typeof provided === 'function') {
+    // dshHomePath(...segments) 拼在解析出的主目录下；这里只要根。
+    const root = provided()
+    if (typeof root === 'string' && root.length > 0) return root
+  }
+  const env = process.env.DSH_HOME
+  if (typeof env === 'string' && env.trim() !== '') return env.trim()
+  return join(homedir(), '.dsh')
+}
+
+/**
  * 解析台账绝对路径。
  * @param config - 已归一化配置。
+ * @param ctx - Cordis 上下文（可为 undefined）。
  * @returns 绝对路径。
  */
-export function resolveLedgerPath(config) {
+export function resolveLedgerPath(config, ctx) {
   if (config.ledgerPath.length > 0) return config.ledgerPath
-  return dshHomePath('workspace-archive', config.ledgerFile)
+  return join(resolveDshHome(ctx), 'workspace-archive', config.ledgerFile)
 }
 
 /**
@@ -242,7 +262,12 @@ export function createEngine(deps) {
  * @returns 定时器句柄或 undefined。
  */
 export function scheduleInterval(ctx, run, intervalMs) {
-  const timer = typeof ctx?.get === 'function' ? ctx.get('timer') : undefined
+  let timer
+  try {
+    timer = typeof ctx?.get === 'function' ? ctx.get('timer') : undefined
+  } catch {
+    timer = undefined // 没有 timer 服务就退化，绝不让装载失败
+  }
   if (typeof timer?.interval === 'function') return timer.interval(run, intervalMs)
   const handle = setInterval(run, intervalMs)
   if (typeof ctx?.on === 'function') ctx.on('dispose', () => clearInterval(handle))
@@ -260,7 +285,7 @@ export function apply(ctx, config) {
   const registry = ctx?.workspaceRegistry
   if (registry === undefined) throw new Error('workspace-archive: 缺少 workspaceRegistry 服务')
 
-  const ledger = new LedgerStore(resolveLedgerPath(resolved))
+  const ledger = new LedgerStore(resolveLedgerPath(resolved, ctx))
   const engine = createEngine({ registry, ledger, config: resolved, logger: ctx?.logger })
 
   const run = () => {
