@@ -25,7 +25,7 @@
 ## 危险操作边界（越界前必须先问用户）
 
 - 不删除、不改名、不移动**任何真实工作区目录**；场景验证一律用一次性临时目录。
-- 不写 `~/.dsh` 下的官方存储文件；归档/恢复只走 `ctx.workspaceRegistry` 官方 API。
+- 不写 `~/.dsh` 下官方 `storages/`、`sessions/` 里的任何文件；归档/恢复只走 `ctx.workspaceRegistry` 官方 API。本插件**自己的** sidecar 只允许写在 `$DSH_HOME/workspace-archive/`（`dshHomePath('workspace-archive', …)`）。
 - 归档前必须先落 sidecar 台账；恢复只处理台账交集，**绝不能**批量 `unarchive` 用户手动归档的会话。
 - 不修改 `app.asar`、不修改 profile、不给官方包打补丁。
 - `.recon/` 是只读勘察用的一次性脚本与 asar 展开目录（已 gitignore）；不要把结论留在那里，结论进 `docs/`。

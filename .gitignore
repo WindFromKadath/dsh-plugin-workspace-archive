@@ -12,3 +12,4 @@ Thumbs.db
 # 运行产物
 *.log
 tmp/
+tests/.tmp/

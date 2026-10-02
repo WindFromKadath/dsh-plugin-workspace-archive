@@ -1,6 +1,6 @@
 /**
- * F002 冒烟测试：插件包骨架可被解析、配置可归一化、apply 无副作用。
- * 运行：npm test（等价于 node --import ./test/register.mjs --test tests/）
+ * F002/F003 冒烟测试：插件包骨架的 loader 契约、配置归一化、apply 接线。
+ * 运行：npm test
  */
 
 import { test } from 'node:test'
@@ -8,9 +8,31 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-import { apply, Config, inject, name, resolveConfig } from '../src/index.js'
+import { apply, Config, inject, isActiveSessionRefusal, name, resolveConfig } from '../src/index.js'
 
 const root = new URL('../', import.meta.url)
+
+/** 一个不产生真实定时器的 ctx 替身。 */
+function stubContext(options = {}) {
+  const logs = []
+  return {
+    logs,
+    ctx: {
+      logger: {
+        info: (message) => logs.push(['info', message]),
+        warn: (message) => logs.push(['warn', message])
+      },
+      // 可选 timer 服务：提供它就不会退化出真实的全局 setInterval。
+      get: (name) => (name === 'timer' ? { interval: () => ({ dispose() {} }) } : undefined),
+      on: () => {},
+      workspaceRegistry: {
+        list: () => options.workspaces ?? [],
+        archiveSession: () => {},
+        unarchiveSession: () => {}
+      }
+    }
+  }
+}
 
 test('loader 契约：name / inject / Config 形态正确', () => {
   assert.equal(name, 'dsh-plugin-workspace-archive')
@@ -19,12 +41,13 @@ test('loader 契约：name / inject / Config 形态正确', () => {
   assert.equal(typeof apply, 'function')
 })
 
-test('Config 空配置可归一化，且带出默认值', () => {
+test('Config 空配置可归一化，且默认安全（dryRun）', () => {
   const parsed = Config({})
   assert.equal(parsed.pollIntervalMs, 60000)
   assert.equal(parsed.missingConfirmations, 3)
-  assert.equal(parsed.ledgerFile, 'workspace-archive-ledger.json')
-  assert.equal(parsed.dryRun, true, '首次真机演练必须是 dryRun')
+  assert.equal(parsed.ledgerFile, 'ledger.json')
+  assert.equal(parsed.ledgerPath, '')
+  assert.equal(parsed.dryRun, true, '默认必须是 dryRun，真机演练前不动数据')
 })
 
 test('resolveConfig 拒绝越界值，并接受合法覆盖', () => {
@@ -32,39 +55,34 @@ test('resolveConfig 拒绝越界值，并接受合法覆盖', () => {
   assert.throws(() => resolveConfig({ missingConfirmations: 0 }), /missingConfirmations/)
   assert.throws(() => resolveConfig({ ledgerFile: '' }), /ledgerFile/)
   assert.throws(() => resolveConfig({ dryRun: 'yes' }), /dryRun/)
-  const resolved = resolveConfig({ pollIntervalMs: 30000, missingConfirmations: 2, dryRun: false })
-  assert.deepEqual(resolved, {
+  assert.deepEqual(resolveConfig({ pollIntervalMs: 30000, missingConfirmations: 2, dryRun: false }), {
     pollIntervalMs: 30000,
     missingConfirmations: 2,
-    ledgerFile: 'workspace-archive-ledger.json',
+    ledgerFile: 'ledger.json',
+    ledgerPath: '',
     dryRun: false
   })
 })
 
-test('apply 只报告就绪：不注册服务、不碰注册表写入', () => {
-  const calls = { list: 0, archive: 0, unarchive: 0 }
-  const logs = []
-  const ctx = {
-    logger: { info: (message) => logs.push(message) },
-    workspaceRegistry: {
-      list: () => { calls.list++; return [{ id: 'w1' }, { id: 'w2' }] },
-      archiveSession: () => { calls.archive++ },
-      unarchiveSession: () => { calls.unarchive++ }
-    }
-  }
-
-  apply(ctx, {})
-
-  assert.equal(logs.length, 1, '骨架只记一行就绪日志')
-  assert.match(logs[0], /workspace-archive/)
-  assert.match(logs[0], /workspaces=2/)
-  assert.equal(calls.archive, 0, '骨架不得归档任何会话')
-  assert.equal(calls.unarchive, 0, '骨架不得恢复任何会话')
+test('apply 缺少 workspaceRegistry 时明确报错（不静默装载）', () => {
+  assert.throws(() => apply({}, {}), /workspaceRegistry/)
 })
 
-test('apply 在没有 logger / 没有注册表时也不抛错（可测性）', () => {
-  assert.doesNotThrow(() => apply({}, {}))
-  assert.doesNotThrow(() => apply(undefined, {}) === undefined)
+test('apply 返回引擎句柄，且 dryRun 下只记日志不动注册表', () => {
+  const { ctx, logs } = stubContext({ workspaces: [] })
+  const handle = apply(ctx, { ledgerPath: '<repo>\\nonexistent\\ledger.json' })
+
+  assert.equal(typeof handle.engine.tick, 'function')
+  assert.equal(handle.ledger.persist, false, 'dryRun 下不落盘')
+  assert.ok(logs.some(([, message]) => /已装载/.test(message)))
+})
+
+test('isActiveSessionRefusal 按官方错误名/activity 识别「会话仍在跑」', () => {
+  const named = Object.assign(new Error('active'), { name: 'WorkspaceActiveSessionError' })
+  assert.equal(isActiveSessionRefusal(named), true)
+  assert.equal(isActiveSessionRefusal({ activity: [] }), true)
+  assert.equal(isActiveSessionRefusal(new Error('other')), false)
+  assert.equal(isActiveSessionRefusal(undefined), false)
 })
 
 test('cordis.patch.yml 声明的行名与本包一致（装载入口自检）', () => {
