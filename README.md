@@ -68,7 +68,8 @@
 | D008 | 2026-10-02 | 装进 desktop profile 用「package.json 依赖 + bundles 开关 + junction + patch 层按 id 覆盖配置」；**不**改 app 自己管理的字段以外的东西 | 本地 link 走不了 `dsh plugin --profile desktop`（launcher 明确拒绝）；插件页「已安装」读的就是 `dependencies`，只建 junction 不会出现（第一版白装的教训） | 已采纳（`--uninstall` 可回滚） |
 | D009 | 2026-10-02 | 插件**零外部依赖**：不 import `@deepseek-ai/schemastery`（不再导出 `Config`）、不 import `dsh-home-paths`（自己按 `ctx.get('dshHomePath')` → `$DSH_HOME` → `~/.dsh` 解析） | **真机装载失败抓到**：junction 装载时 Node 按真实路径解析嵌套 import，够不到宿主包 → `ERR_MODULE_NOT_FOUND`。代价：没有 schemastery 的配置 schema（UI/config dump 不再列字段），校验与默认值由 `resolveConfig` 全权负责，已有测试覆盖 | 已采纳（`68bbe7f`） |
 
-**待确认**：重启 DSH 后，验收 `~\.dsh\workspace-archive\ledger.json` 是否出现（装载成功的可观察证据）；确认后再把 F002 收尾。
+**现场演示（2026-10-02，真机、真注册表、真会话）**：用一次性工作区 `plugin-2\.verify\demo-ws`（已 gitignore）——
+① 健康轮台账记下 `demo-ws` + 会话 `session-f624ddb3…`；② 目录改名 → `missingSince=06:07:27Z`、台账与**官方** `workspace.json` 的归档集合都含该会话；③ 目录改回 → 台账清空、官方归档集合移除它。全程 5 个工作区的插件归档数保持 0，用户手动归档集合未被误动（96→98 的 +2 经审计为**插件之外**的孤儿会话归档，见对话记录）。
 
 ## 给 Agent 的启动语
 

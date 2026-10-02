@@ -17,3 +17,4 @@ tests/.tmp/
 # 真机测试的一次性运行时（可重建；.verify 下的脚本与配置要保留）
 .verify/home/
 .verify/proj/
+.verify/demo-ws/
