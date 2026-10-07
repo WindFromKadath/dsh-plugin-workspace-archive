@@ -18,3 +18,27 @@ tests/.tmp/
 .verify/home/
 .verify/proj/
 .verify/demo-ws/
+
+# 文件权限修复的记录与撤销脚本（本机一次性产物，2026-10-07）
+.verify/acl-recovery/
+
+# 隐私与提交（合并自「AI 协作与项目开发」库 02-隐私与发布/模板/gitignore.fragment）
+# 注意：忽略规则只影响尚未跟踪的文件，已跟踪内容与旧历史不会因此清除。
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+.privacy.local.json
+privacy-report*.json
+private-audit/
+private-backup/
+raw-sessions/
+*.original.bundle
+*.pem
+*.key
+id_rsa
+id_ed25519
+credentials.json
+auth.json
+settings.local.json

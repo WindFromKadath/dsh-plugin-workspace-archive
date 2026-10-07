@@ -434,7 +434,7 @@ const titleProjectionDefinition = {
 
 ```json
 {"version":7,"record":{
-  "identity":{"formatVersion":4,"createdAt":1790915531643,"cwd":"<repo>","isSeeded":false,"inheritedEventCount":0},
+  "identity":{"formatVersion":4,"createdAt":1790915531643,"cwd":"<repo>\\...\\plugin-2","isSeeded":false,"inheritedEventCount":0},
   "rows":{
     "title":{"ver":1,"seq":126,"val":"你是在为 DSH（DeepSeek Harness）"},
     "titleInput":{"ver":3,"seq":126,"val":{"first":{"seq":8,"text":"..."},"count":1,"lastSeq":8}},

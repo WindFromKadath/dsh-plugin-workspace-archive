@@ -1,0 +1,12 @@
+{
+  "allowedCommitEmails": [
+    "294740142+WindFromKadath@users.noreply.github.com",
+    "github@github.com",
+    "noreply@github.com",
+    "dev@localhost",
+    "codex@localhost"
+  ],
+  "allowedPublicEmails": [],
+  "reviewedBinaryFiles": [],
+  "maxFileBytes": 10485760
+}

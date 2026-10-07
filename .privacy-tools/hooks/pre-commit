@@ -1,0 +1,6 @@
+#!/bin/sh
+if ! command -v pwsh >/dev/null 2>&1; then
+    printf '%s\n' 'Privacy check requires PowerShell 7 (pwsh).' >&2
+    exit 3
+fi
+exec pwsh -NoProfile -File .privacy-tools/Invoke-PrivacyCheck.ps1 -Repo . -Mode Staged -Policy .privacy-tools/privacy-policy.json
