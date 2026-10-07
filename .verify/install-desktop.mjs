@@ -9,16 +9,19 @@
  * （与其中 ui-chat / llm-pi-ai 那些条目同一种写法），既不改编译包的默认值，
  * 也不与 bundle 自己声明的行重复插入。
  *
- * 全部改动前都备份，`--uninstall` 逐项还原。
+ * 全部改动前都备份；`--uninstall` **逐项精准移除**（只摘本插件的依赖项、bundle 选择项与
+ * patch 区域），**不**从备份整体还原 —— 2026-10-07 实测整体还原会把之后新增的依赖
+ * （`dshmarket`）一起弄丢。
  *
  * 用法：
  *   node .verify/install-desktop.mjs                # 安装
  *   node .verify/install-desktop.mjs --dry-run      # 只打印将要做的改动
  *   node .verify/install-desktop.mjs --uninstall    # 回滚
+ *   node .verify/install-desktop.mjs --status       # 只读：报告当前三项状态
  *   node .verify/install-desktop.mjs --profile <dir>
  */
 
-import { copyFile, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -42,6 +45,7 @@ const profileDir = resolve(profileArgIndex === -1
   : argv[profileArgIndex + 1])
 const uninstall = argv.includes('--uninstall')
 const dryRun = argv.includes('--dry-run')
+const status = argv.includes('--status')
 
 const manifestFile = join(profileDir, 'package.json')
 const patchFile = join(profileDir, 'cordis.patch.yml')
@@ -75,22 +79,6 @@ function stripManaged(text) {
   return text
 }
 
-/** 找一个「不含本插件名」的 patch 备份：用来回到未被本脚本改过的状态。 */
-async function pristinePatchBackup() {
-  const entries = await readdir(profileDir).catch(() => [])
-  for (const name of entries.filter((n) => n.startsWith('cordis.patch.yml.bak-')).sort().reverse()) {
-    const text = await readFile(join(profileDir, name), 'utf8').catch(() => '')
-    if (text.includes(PACKAGE_NAME) === false) return join(profileDir, name)
-  }
-  return undefined
-}
-
-async function newestManifestBackup() {
-  const entries = await readdir(profileDir).catch(() => [])
-  const found = entries.filter((n) => n.startsWith('package.json.bak-') && n.includes('workspace-archive')).sort()
-  return found.length === 0 ? undefined : join(profileDir, found.at(-1))
-}
-
 async function readManifest() {
   return JSON.parse(await readFile(manifestFile, 'utf8'))
 }
@@ -99,29 +87,49 @@ async function writeManifest(manifest) {
   await writeFile(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
 }
 
+/** 只读状态：四项安装事实 + 台账，各自当前是什么样。 */
+if (status) {
+  const manifest = existsSync(manifestFile) ? await readManifest() : undefined
+  const spec = manifest?.dependencies?.[PACKAGE_NAME]
+  const bundles = manifest?.dsh?.profile?.bundles
+  const inBundles = Array.isArray(bundles) && bundles.includes(PACKAGE_NAME)
+  const patchText = existsSync(patchFile) ? await readFile(patchFile, 'utf8') : ''
+  console.log(`profile          ${profileDir}`)
+  console.log(`1. 依赖声明      ${spec === undefined ? '缺' : spec}（期望 link:${rootPath}）`)
+  console.log(`2. bundle 启用   ${inBundles ? '已启用' : '未启用'}`)
+  console.log(`3. node_modules  ${existsSync(linkPath) ? 'junction 在' : '缺 junction'}：${linkPath}`)
+  console.log(`4. patch 区域    ${patchText.includes(START) ? '在' : '缺'}`)
+  console.log(`5. 台账          ${existsSync(ledgerFile) ? '已写出（说明插件跑过）' : '尚未写出'}：${ledgerFile}`)
+  process.exit(0)
+}
+
 if (uninstall) {
-  const manifestBackup = await newestManifestBackup()
-  if (manifestBackup !== undefined) {
-    await copyFile(manifestBackup, manifestFile)
-    console.log(`已还原 package.json：← ${manifestBackup}`)
-  } else if (existsSync(manifestFile)) {
+  // 逐项精准移除：只动本插件自己的那一项，**不**用备份整体还原（那会连带丢掉之后新增的依赖）。
+  if (existsSync(manifestFile)) {
     const manifest = await readManifest()
-    if (manifest.dependencies?.[PACKAGE_NAME] !== undefined) delete manifest.dependencies[PACKAGE_NAME]
+    const hasDep = manifest.dependencies?.[PACKAGE_NAME] !== undefined
     const bundles = manifest.dsh?.profile?.bundles
-    if (Array.isArray(bundles)) manifest.dsh.profile.bundles = bundles.filter((name) => name !== PACKAGE_NAME)
-    await writeManifest(manifest)
-    console.log('已从 package.json 摘掉依赖与 bundle 选择（未找到本脚本的备份）')
+    const hasBundle = Array.isArray(bundles) && bundles.includes(PACKAGE_NAME)
+    if (hasDep || hasBundle) {
+      await copyFile(manifestFile, `${manifestFile}.bak-${stamp}-workspace-archive-uninstall`)
+      if (hasDep) delete manifest.dependencies[PACKAGE_NAME]
+      if (hasBundle) manifest.dsh.profile.bundles = bundles.filter((name) => name !== PACKAGE_NAME)
+      await writeManifest(manifest)
+      console.log('已从 package.json 摘掉本插件的依赖与 bundle 选择（其它依赖与插件原样保留）')
+    } else {
+      console.log('package.json 里本来就没有本插件，跳过。')
+    }
   }
 
-  const pristine = await pristinePatchBackup()
   if (existsSync(patchFile)) {
-    if (pristine !== undefined) {
-      const base = await readFile(pristine, 'utf8')
-      await writeFile(patchFile, base.endsWith('\n') ? base : `${base}\n`, 'utf8')
-      console.log(`已还原 patch 层：← ${pristine}`)
+    const current = await readFile(patchFile, 'utf8')
+    const stripped = stripManaged(current)
+    if (stripped === current) {
+      console.log('patch 层里本来就没有本插件的区域，跳过。')
     } else {
-      await writeFile(patchFile, stripManaged(await readFile(patchFile, 'utf8')), 'utf8')
-      console.log('已从 patch 层移除本插件的配置覆盖')
+      await copyFile(patchFile, `${patchFile}.bak-${stamp}-workspace-archive-uninstall`)
+      await writeFile(patchFile, stripped, 'utf8')
+      console.log('已从 patch 层移除本插件的配置覆盖（其它条目原样保留）')
     }
   }
 
@@ -129,7 +137,7 @@ if (uninstall) {
     await rm(linkPath, { recursive: false, force: true })
     console.log(`已删除 junction：${linkPath}`)
   }
-  console.log('卸载完成。重启 DSH 后插件不再装载。')
+  console.log('卸载完成（逐项精准移除，未从备份整体还原）。重启 DSH 后插件不再装载。')
   process.exit(0)
 }
 

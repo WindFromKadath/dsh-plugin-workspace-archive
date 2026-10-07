@@ -14,7 +14,8 @@
  *   "workspaces": {
  *     "<归一化路径>": {
  *       "path": "<绝对路径>",
- *       "title": "plugin-2",
+ *       "title": "dsh-plugin-workspace-archive",
+ *       "workspaceId": "官方记录 id",       // 与当前注册表不一致 ⇒ 记录被删掉后重建（= 一次消失）
  *       "sessionIds": ["session-a"],      // 最近一次健康时看到的成员
  *       "missingSince": "ISO" | null,     // 首次确认缺失的时间
  *       "archivedSessionIds": ["session-a"] // 本插件亲手归档的（恢复的唯一依据）
@@ -115,18 +116,20 @@ export class LedgerStore {
   }
 
   /**
-   * 健康时同步成员：刷新 sessionIds、清掉 missingSince。
+   * 健康时同步成员：刷新 sessionIds、清掉 missingSince、记下当前官方记录 id。
    * @param path - 工作区路径。
    * @param title - 工作区显示名。
    * @param sessionIds - 注册表当前成员。
+   * @param workspaceId - 当前官方记录的 id；用来识别"记录被删掉后重建"（见 policy）。
    * @returns 该条目。
    */
-  syncHealthy(path, title, sessionIds) {
+  syncHealthy(path, title, sessionIds, workspaceId) {
     const key = pathKey(path)
     const previous = this.data.workspaces[key]
     const entry = {
       path: String(path),
       title: typeof title === 'string' ? title : (previous?.title ?? ''),
+      workspaceId: typeof workspaceId === 'string' && workspaceId.length > 0 ? workspaceId : previous?.workspaceId,
       sessionIds: [...sessionIds],
       missingSince: null,
       archivedSessionIds: previous?.archivedSessionIds ?? []

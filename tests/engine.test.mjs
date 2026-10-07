@@ -27,6 +27,7 @@ function fakeWorld(options = {}) {
     exists: true,
     path: '<repo>\\proj',
     title: 'proj',
+    workspaceId: options.workspaceId ?? 'ws-1',
     members: ['s1', 's2'],
     archived: new Set(options.archived ?? []),
     active: new Set(options.active ?? []),
@@ -35,12 +36,23 @@ function fakeWorld(options = {}) {
 
   const registry = {
     list: () => [{
+      id: state.workspaceId,
       path: state.path,
       title: state.title,
       get sessionIds() {
         return state.exists ? [...state.members] : []
       },
-      status: async () => (state.exists ? 'ok' : 'missing-dir')
+      status: async () => (state.exists ? 'ok' : 'missing-dir'),
+      /**
+       * 官方 `Workspace.attachSession`：自带 `cwd === 工作区路径` 校验，且是**前插**
+       * （新成员排在最前）。「删除项目后重新添加同一目录」时应用会建一个空成员的新记录，
+       * 插件必须靠它把恢复出来的会话挂回去，否则会话会散成「无项目」。
+       */
+      async attachSession(sessionId) {
+        state.calls.push(['attach', sessionId])
+        if (state.exists === false) throw new Error('cannot attach: the path is not a directory')
+        if (state.members.includes(sessionId) === false) state.members.unshift(sessionId)
+      }
     }],
     /** 官方归档集合快照：引擎靠它区分「用户手动归档」与「本插件归档」。 */
     get archivedSessionIds() {
@@ -216,7 +228,7 @@ test('dryRun：只记日志，不动注册表、不写台账', async () => {
   await assert.rejects(readFile(file, 'utf8'), /ENOENT/)
 })
 
-test('「删除工作区」（项目登记被移除、目录仍在）→ 归档；重新添加同一目录 → 恢复', async () => {
+test('「删除工作区」（项目登记被移除、目录仍在）→ 归档；重新添加同一目录 → 恢复并挂回工作区', async () => {
   // 用户 2026-10-02 确认的语义：菜单里的"删除工作区"只删登记、不动文件夹，
   // 所以不能只看目录存在性——登记没了也算消失。
   const world = fakeWorld({ archived: [] })
@@ -233,13 +245,62 @@ test('「删除工作区」（项目登记被移除、目录仍在）→ 归档�
   assert.deepEqual(world.state.calls, [['archive', 's1'], ['archive', 's2']])
   assert.deepEqual(ledger.entry('<repo>\\proj').archivedSessionIds, ['s1', 's2'])
 
-  // 重新添加同一目录：注册表又列出它 → 恢复台账交集
+  // 重新添加同一目录：官方语义是**新建一个空成员的项目**（旧会话不会自动回来）。
+  // ⇒ 插件只取消归档还不够，必须再把会话挂回新项目；否则它们会散成「无项目」。
+  //    这是 2026-10-07 用户真机反馈的缺口（Rust 工作区：恢复了但没加回工作区）。
   world.state.calls.length = 0
+  world.state.members = [] // ← 新记录：空成员
+  world.state.workspaceId = 'ws-2' // ← 新记录：新 id（旧记录已被 delete 掉）
   world.registry.list = listRegistered
   await engine.tick()
 
-  assert.deepEqual(world.state.calls, [['unarchive', 's1'], ['unarchive', 's2']])
+  assert.deepEqual(world.state.calls, [
+    ['unarchive', 's1'], ['unarchive', 's2'],
+    ['attach', 's2'], ['attach', 's1'] // attachSession 是前插，倒序挂回才能保持原相对顺序
+  ])
+  assert.deepEqual(world.state.members, ['s1', 's2'], '恢复后必须挂回工作区，且保持原来的相对顺序')
   assert.deepEqual(ledger.entry('<repo>\\proj').archivedSessionIds, [])
+})
+
+test('重新添加同一目录（插件当时没在跑：台账没有 missingSince、工作区 id 变了）→ 按台账把成员挂回', async () => {
+  // 用户 2026-10-07 真机反馈的第二种情形：会话在消失**之前就已经是归档状态**（尤其是
+  // 用户自己手动归档的）。官方记录被删掉重建后，新记录是空成员表 —— 光恢复"本插件归档过的
+  // 那批"不够，用户归档的那批也要把**分组**挂回去，但**绝不能动它的归档状态**。
+  const world = fakeWorld({ archived: ['s2'], workspaceId: 'ws-2' })
+  world.state.members = [] // 新记录：空成员
+  await mkdir(tmpRoot, { recursive: true })
+  const dir = await mkdtemp(join(tmpRoot, 'engine-'))
+  const ledger = new LedgerStore(join(dir, 'ledger.json'))
+  // 模拟"插件上次跑时"记下的快照：旧记录 ws-1 的成员是 s1、s2，且当时什么都没归档。
+  ledger.syncHealthy('<repo>\\proj', 'proj', ['s1', 's2'], 'ws-1')
+
+  const engine = createEngine({
+    registry: world.registry,
+    ledger,
+    config: { pollIntervalMs: 300000, confirmDelayMs: 0, dryRun: false, watch: false },
+    logger: {},
+    timers: { setTimeout: () => null, clearTimeout: () => {} }
+  })
+  await engine.tick()
+
+  assert.deepEqual(world.state.members, ['s1', 's2'], '台账记过的成员都要挂回新记录，且保持原相对顺序')
+  assert.equal(world.state.archived.has('s2'), true, '用户手动归档的 s2 必须仍然归档')
+  assert.equal(world.state.archived.has('s1'), false, 's1 本来没归档，不得被莫名归档')
+  assert.equal(world.state.calls.some((call) => call[0] === 'unarchive'), false, '没有本插件归档过的会话时不得调 unarchive')
+  assert.deepEqual(ledger.entry('<repo>\\proj').archivedSessionIds, [], '不得把用户归档的会话记成自己的账')
+})
+
+test('平时（没经历过消失、记录 id 没变）不重挂：用户手动移出工作区的成员不会被塞回去', async () => {
+  const world = fakeWorld()
+  const { engine } = await makeEngine(world)
+  await engine.tick() // 健康轮：台账记下 s1、s2（ws-1）
+
+  world.state.calls.length = 0
+  world.state.members = ['s1'] // 用户把 s2 移出工作区
+  await engine.tick()
+
+  assert.deepEqual(world.state.calls, [], '不得把用户移出的成员又挂回去')
+  assert.deepEqual(world.state.members, ['s1'])
 })
 
 test('启动瞬态保护：注册表从未非空时，不把台账路径当作「项目被移除」', async () => {

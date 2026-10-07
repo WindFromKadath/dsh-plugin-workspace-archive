@@ -2,15 +2,18 @@
  * 决策层（纯函数，无 I/O）：把「一次探测看到的目录/登记状态」变成「这一轮该做什么」。
  *
  * 输入 observations：每个被跟踪的工作区一条
- *   { path, title, sessionIds, exists, reason }
+ *   { path, title, workspaceId, sessionIds, exists, reason }
  *   - path/sessionIds 来自官方注册表（`ctx.workspaceRegistry.list()` 的实体），
  *     登记被移除后来自插件自己的台账；
+ *   - workspaceId 是官方记录 id：与台账里记下的不一致 ⇒ 记录被删掉后重建（= 一次消失）；
  *   - exists=false 有两种原因：`folder-missing`（目录不在）或 `unregistered`
  *     （项目登记被移除，即菜单里的「删除工作区」）。
  *
  * 输出 actions：
  *   { kind: 'archive',   path, sessionIds, reason }  确认消失 → 归档
- *   { kind: 'unarchive', path, sessionIds }          回来 → 只恢复本插件归档过的
+ *   { kind: 'unarchive', path, sessionIds }          回来 → 只取消归档本插件归档过的那批
+ *   { kind: 'attach',    path, sessionIds }          经历过消失 → 把台账快照里缺席的成员挂回分组
+ *                                                    （**不改归档状态**；平时绝不下发）
  *
  * 确认模型是**时间型**（不是"连续 N 次轮询"）：第一次看到消失时记下时间戳，之后只要
  * 仍是消失且已过 `confirmDelayMs` 就归档。事件驱动（秒级触发）与兜底轮询共用这一套判定，
@@ -43,12 +46,27 @@ export function evaluate(options) {
 
     if (exists) {
       next.missingSince.delete(path)
+      // 同步之前先取快照：成员表、官方记录 id、以及"上次是不是被判定过消失"。
+      const recorded = entry?.sessionIds ?? []
+      const recreated = entry?.workspaceId !== undefined
+        && observation.workspaceId !== undefined
+        && entry.workspaceId !== observation.workspaceId
+      const wasMissing = entry?.missingSince != null
+      const current = new Set(sessionIds)
+      const missing = recorded.filter((id) => current.has(id) === false)
       // 目录/登记在：刷新成员视图（这是「抢在官方 prune 之前」的那次记录）。
-      ledger.syncHealthy(path, title, sessionIds)
-      // 回来了且本插件归档过 → 只恢复台账交集。
+      ledger.syncHealthy(path, title, sessionIds, observation.workspaceId)
+      // 回来了且本插件归档过 → 只恢复台账交集（取消归档）。
       const restorable = ledger.entry(path)?.archivedSessionIds ?? []
       if (restorable.length > 0) {
         actions.push({ kind: 'unarchive', path, sessionIds: [...restorable] })
+      }
+      // 这个工作区**经历过一次消失**（台账记着 missingSince，或官方记录被删掉后重建 = id 变了）
+      // ⇒ 现在的记录是空成员表，要按台账把成员**挂回分组**。
+      // ⚠️ 只在"经历过消失"时做：平时绝不重挂，否则会把用户手动移出工作区的会话又塞回去。
+      // 名单里可能含**用户自己归档**的会话 —— 只挂回分组，绝不改它的归档状态。
+      if ((recreated || wasMissing) && missing.length > 0) {
+        actions.push({ kind: 'attach', path, sessionIds: missing })
       }
       continue
     }

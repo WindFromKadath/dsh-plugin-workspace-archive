@@ -3,7 +3,7 @@
  * 的 DSH 包（锚点是 DSH profile 目录），让插件模块与测试能直接从本仓库运行。
  *
  * 运行时（在 DSH 进程内）不需要它：Loader 自己的解析会找到同样的包。
- * 约定沿用 plugin-1 的 test/resolve-dsh.mjs。
+ * 约定沿用 dsh-plugin-branch 的 test/resolve-dsh.mjs。
  *
  * @module test/resolve-dsh
  */

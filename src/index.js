@@ -17,7 +17,9 @@
  *   1. 目录消失没有事件 → 轮询 + 去抖；
  *   2. 失效 id 会被下一次 workspace 写操作永久 prune → 健康时就把 id 记进台账；
  *   3. 重新添加目录会新建空项目 → 恢复靠台账路径，不靠 workspaceId；
- *   4. `archivedSessionIds` 无来源标记 → 恢复只处理台账交集。
+ *   4. `archivedSessionIds` 无来源标记 → 恢复只处理台账交集；
+ *   5. 「删除工作区 → 重新添加同一目录」会新建**空成员**的项目 → 恢复时必须用官方
+ *      `Workspace.attachSession` 把会话挂回去，否则它们散成「无项目」（2026-10-07 实测）。
  *
  * @module dsh-plugin-workspace-archive
  */
@@ -27,7 +29,7 @@ import { watch as fsWatch } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 
-import { LedgerStore } from './ledger.js'
+import { LedgerStore, pathKey } from './ledger.js'
 import { createProbeState, evaluate } from './policy.js'
 
 /** Loader 行名。 */
@@ -182,9 +184,13 @@ export function createEngine(deps) {
       observations.push({
         path: workspace.path,
         title: workspace.title,
+        // 官方记录 id：policy 靠它识别"记录被删掉后重建"（= 一次消失）。
+        workspaceId: workspace.id,
         sessionIds: [...workspace.sessionIds],
         exists,
-        reason: exists ? 'ok' : 'folder-missing'
+        reason: exists ? 'ok' : 'folder-missing',
+        // 官方实体本身：恢复时用它把会话挂回工作区（`attachSession`）。
+        workspace
       })
       seen.add(workspace.path.toLowerCase())
     }
@@ -238,7 +244,7 @@ export function createEngine(deps) {
   }
 
   /**
-   * 恢复一批会话：只处理台账交集。
+   * 恢复一批会话：只处理台账交集（取消归档）。挂回工作区分组是另一件事，见 `attachRestored`。
    * @param action - policy 给出的动作。
    */
   async function runUnarchive(action) {
@@ -256,9 +262,45 @@ export function createEngine(deps) {
         logger?.warn?.(`workspace-archive: 恢复 ${sessionId} 失败：${String(error)}`)
       }
     }
-    if (restored.length > 0) {
-      ledger.recordRestored(action.path, restored)
-      await ledger.save()
+    if (restored.length === 0) return
+    ledger.recordRestored(action.path, restored)
+    await ledger.save()
+  }
+
+  /**
+   * 把台账记过的成员挂回工作区（`Workspace.attachSession`）——**只恢复分组，不改归档状态**。
+   *
+   * 为什么必须有这一步：官方「归档」**不拆** `sessionIds` 槽位，所以"登记还在、目录一度缺失"
+   * 的场景下取消归档就等于回到原位；但菜单里的「删除工作区 → 重新添加同一目录」会**新建一个
+   * 空成员的项目**（官方语义，旧会话不会自动回来），于是所有成员都散成「无项目」。
+   *
+   * 名单是**台账快照里所有缺席的成员**，不只是本插件归档过的那批 —— 会话在消失**之前就已经
+   * 归档**（典型是用户自己手动归档的）同样会丢槽位，它也该回到自己的分组里；但它**必须保持
+   * 归档状态**（这里只调 `attachSession`，绝不碰 `archivedSessionIds`）。
+   *
+   * 触发条件由 policy 把住：只有"这个工作区经历过一次消失"（台账记着 `missingSince`，或官方
+   * 记录被删掉后重建 = id 变了）才会下发本动作 —— 平时绝不重挂，否则会把用户手动移出工作区的
+   * 会话又塞回去。
+   *
+   * `attachSession` 自带 `cwd === 工作区路径` 校验：目录被改名等对不上的情形会抛错，
+   * 这里只记日志、继续处理其余会话，绝不猜路径、也不强塞。
+   * 它是**前插**（新成员排最前），所以按倒序挂回，恢复后的相对顺序才与原来的成员表一致。
+   *
+   * @param action - policy 给出的 attach 动作（`sessionIds` = 台账快照里缺席的成员）。
+   * @param workspace - 官方工作区实体；缺失或没有该方法时跳过（例如登记尚未回来）。
+   * @param sessionIds - 要挂回的会话 id（按原相对顺序）。
+   */
+  async function attachRestored(action, workspace, sessionIds) {
+    if (workspace === undefined || typeof workspace.attachSession !== 'function') return
+    const members = new Set(workspace.sessionIds ?? [])
+    const missing = sessionIds.filter((sessionId) => members.has(sessionId) === false)
+    for (const sessionId of [...missing].reverse()) {
+      try {
+        await workspace.attachSession(sessionId)
+        logger?.info?.(`workspace-archive: 已挂回工作区 ${sessionId}（${action.path}）`)
+      } catch (error) {
+        logger?.warn?.(`workspace-archive: 挂回 ${sessionId} 失败（${action.path}）：${String(error)}`)
+      }
     }
   }
 
@@ -373,9 +415,19 @@ export function createEngine(deps) {
       alreadyArchived: new Set(registry.archivedSessionIds ?? [])
     })
     probeState = state
+    // 恢复/挂回都要用官方实体，所以先把这一轮看到的实体按路径索引好。
+    const workspacesByPath = new Map()
+    for (const observation of observations) {
+      if (observation.workspace !== undefined) {
+        workspacesByPath.set(pathKey(observation.path), observation.workspace)
+      }
+    }
     for (const action of actions) {
       if (action.kind === 'archive') await runArchive(action)
       else if (action.kind === 'unarchive') await runUnarchive(action)
+      else if (action.kind === 'attach') {
+        await attachRestored(action, workspacesByPath.get(pathKey(action.path)), action.sessionIds)
+      }
     }
     // 健康视图也要落盘：这就是「抢在官方 prune 之前」的那份记录。
     if (!config.dryRun && actions.every((action) => action.kind !== 'archive')) await ledger.save()

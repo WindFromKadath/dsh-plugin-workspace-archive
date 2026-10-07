@@ -178,6 +178,20 @@ try {
   check('重新添加目录：会话 A 自动恢复（靠台账交集，不靠新记录）', archivedAfterReadd.has(sessionA) === false, { sessionA })
   check('重新添加目录：用户手动归档的 B 仍然归档', archivedAfterReadd.has(sessionB) === true, { sessionB })
 
+  // 官方语义：重新添加同一目录会新建**空成员**的项目（旧会话不会自动回来）。
+  // 所以"取消归档"只是让会话不再隐藏，还必须把台账记过的成员挂回这个新项目，
+  // 否则会散成「无项目」；**已经归档**的成员（例如用户手动归档的 B）同样要挂回分组，
+  // 但归档状态绝不能被顺手改掉。
+  const readdedRecord = Object.values((await readJson(registryFile)).tables.workspaces)
+    .find((row) => row.path.toLowerCase() === entryKey)
+  check('重新添加目录：会话 A 被挂回新项目（不再散成「无项目」）', (readdedRecord?.sessionIds ?? []).includes(sessionA), {
+    sessionIds: readdedRecord?.sessionIds
+  })
+  check('重新添加目录：用户手动归档的 B 也被挂回新项目（只恢复分组）', (readdedRecord?.sessionIds ?? []).includes(sessionB), {
+    sessionIds: readdedRecord?.sessionIds
+  })
+  check('重新添加目录：B 仍然归档 —— 挂回分组 ≠ 取消归档', archivedAfterReadd.has(sessionB) === true, { sessionB })
+
   console.log('\n── 真实注册表（测试 DSH_HOME）──')
   console.log(JSON.stringify({ archivedSessionIds: [...archivedAfterReadd] }, null, 2))
   console.log('── 台账 ──')

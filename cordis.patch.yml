@@ -10,7 +10,9 @@
 # The row references this package by name so Node resolution finds the
 # installed code; behavior comes from ./src/index.js.
 #
-# F002 状态：骨架。apply() 只校验配置并记录一行日志，不注册定时器、不读写任何数据。
+# 当前形态：事件驱动（`domain/changed` + 工作区父目录 `fs.watch`）+ 时间型确认
+# （`confirmDelayMs`）+ 低频兜底轮询；台账先落盘再动官方归档。配置默认值见
+# src/index.js 的 resolveConfig，真机启用时由 profile 的 patch 层覆盖为 dryRun: false。
 
 - insert:
     - id: workspace-archive
