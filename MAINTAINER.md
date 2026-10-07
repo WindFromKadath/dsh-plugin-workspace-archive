@@ -78,7 +78,9 @@
 - 本仓库**本地署名**：`WindFromKadath <294740142+WindFromKadath@users.noreply.github.com>`（2026-10-07 设置，知识库「隐私检查与提交方案」§2）。
 - 隐私检查工具已复制到 [.privacy-tools/](.privacy-tools/)（脚本 + 公共规则 + Hook 模板，**Hook 未启用**）；报告与例外见该目录的 README 与 VERIFICATION。
 - 公开范围：**public + MIT**（用户 2026-10-07 决定）；默认分支 `main`。
-- 上传前按知识库流程执行：脱敏（本机路径/用户名/会话 slug → 占位符）→ 改写本地历史（私人邮箱与旧内容）→ `Staged`/`History` 检查归零 → 建仓推送 → 回读核验。
+- **已公开**：<https://github.com/WindFromKadath/dsh-plugin-workspace-archive>（2026-10-07 创建并首次推送；远端 14 个提交、HEAD 与本地一致、署名 noreply、GitHub 识别许可证为 MIT、topics 与 description 已写入）。
+- 已按知识库流程执行：脱敏（本机路径 / 用户名 / 会话 slug → 占位符）→ 改写全部本地历史（私人邮箱与旧内容）→ 检查只剩工具自身 1 项误报 → 建仓推送 → 回读核验。完整记录见 [.privacy-tools/VERIFICATION.md](.privacy-tools/VERIFICATION.md)。
+- 旧的脱敏前历史只存在于**仓库外**的受控 bundle 备份里，**不要**从它推送任何分支。
 
 ## 7. 待办
 

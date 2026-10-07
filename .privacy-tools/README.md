@@ -43,14 +43,17 @@ $env:PRIVACY_TERMS_FILE = '<仓库外的私人标识文件>'
 pwsh -NoProfile -File .privacy-tools\Invoke-PrivacyCheck.ps1 -Repo . -Mode Staged -Policy .privacy-tools\privacy-policy.json
 ```
 
-## 当前待处理（2026-10-07 首次实跑）
+## 本项目的实际结果（2026-10-07）
 
 | 模式 | 结果 | 说明 |
 |---|---|---|
-| `Index` | **退出码 1**，103 行 | 阻断项集中在：`docs/recon/*.md` 与 `AGENTS.md` 里的本机真实用户名与本机绝对路径；`tests/*.mjs` 里的**合成**盘符夹具路径（`<drive>:\\proj` 一类，非本机真实路径） |
-| `History` | **退出码 1**，142 行 | 上述文件的历史版本同样命中；另有一条 `commit-email-not-approved`（12 个提交的作者/提交者邮箱是私人邮箱）与 3 条 `email-needs-source-review` |
+| `Staged`（日常） | **1 项**，且是工具自身误报 | 提交前逐次跑，只覆盖本次暂存内容 |
+| `Index`（全快照） | **1 项**，同上 | 38 个文件版本 |
+| `History`（全部历史） | **1 项**，同上 | 104 个历史文件版本；本机路径 / 用户主目录 / UNC **0 处**、真实用户名 **0 处**、旧私人邮箱 **0 处** |
 
-报告原文（仓库外）：工作区根 `.privacy-backup/pa-index.txt`、`pa-history.txt`。
+处理过程：先把文档、脚本、测试夹具里的本机标识统一脱敏（映射表放在**仓库外**），再按知识库「泄露后的处理与验证」流程**改写全部本地历史**（全量 bundle 备份 → 受控副本 `filter-branch` → 回收 → 清旧对象），并把仓库本地署名设为 noreply。完整记录见 [VERIFICATION.md](VERIFICATION.md)。
+
+> 首次实跑（脱敏前）的原始输出是 Index 103 行 / History 142 行，保存在仓库外的受控位置，用于对照。
 
 ## 已知误报
 
