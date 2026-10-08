@@ -33,7 +33,13 @@
 - **两条"看着该做"的能力做不到，别再重复调研**（2026-10-08，逐条源码依据见 [docs/recon/05-migration-and-multi-folder.md](docs/recon/05-migration-and-multi-folder.md)）：
   - **跨工作区迁移会话**（例：Rust → DeepSeekHarness）：官方**无通道** —— `attachSession` 要求 `cwd === 工作区路径`（`dsh-workspace/lib/index.js:111-129`）、`insertSessionBefore` 只能**组内排序**（`:130-147`）、官方客户端拖拽**只能同组**（`dsh-client-ui-workspace/lib/client.js:2545-2546`）、`fork` 落回**源**工作区（`dsh-api-session-controller/lib/types/commands.js:519-531`）。唯一实现方式是直写 `sessions/` 里的 header `cwd` —— **破本插件"只走官方 API"的红线**，且生态已有 `birdmanhj/dsh-mv-session`（需停机 + 重启）。
   - **一个工作区多文件夹**：官方沙盒策略是**单根**（`SandboxExecutionPolicy.workspaceRoot: string`，`dsh-sandbox/lib/types/index.d.ts:27-31`；可写根 = 该根 + 临时目录，`lib/index.js:166-173`；每轮根来自会话 cwd，`dsh-sandbox-policy/lib/index.js:141-148`），官方 ACP 层**明文拒绝** `additionalDirectories`（`dsh-acp/lib/index.js:1412`），且软链/junction 绕不过围栏（`dsh-fs-sandbox/lib/index.js:160` 每次写入重新规范化目标）。多根由第三方 `@chaoset/sandbox-extra-roots` 补，依赖它会破本插件"零依赖"。
-  - **可用且未实施的官方子集**："无项目 → 按 `cwd` 归位"（`header.cwd` 与某已登记工作区 realpath 等值 → `attachSession`）。
+  - **可用的官方子集已实现**（见下一条）。跨 cwd 的**真迁移**（T1）需要离线直写会话 header，**用户 2026-10-08 已放行**；方案、现成实现评估（生态 `dsh-mv-session` 因硬编码代际 0 文件名 `session.jsonl.zstd` 而**不可直接用**）与待勘察清单见 [docs/plan-session-migration.md](docs/plan-session-migration.md)。
+- **「无项目 → 按 cwd 归位」已实现**（T0 / F013，2026-10-08，`src/adopt.js`）：官方 registry 只在**第一次启动**时按 `header.cwd` 归组（bootstrap 一次性），此后"会话落在「无项目」里、而 cwd 就是某个已登记工作区路径"没有任何官方通道能自愈。
+  - 数据源全官方只读：`ctx.sessionPersistence.list()` → 每个已存会话的 `header.cwd`；`workspaceRegistry.list()` → 路径与成员表。**不读 `sessions/` 文件、不解 zstd 帧**。
+  - 判据刻意收紧：**不在任何**工作区的成员表里 + `realpath(cwd)` 与工作区路径**精确相等**（不做前缀/父目录/子目录匹配）+ `cwd` 能解析；按 `createdAt` 升序下发（`attachSession` 是前插 → 结果才是"新的在前"）。
+  - 只调官方 `Workspace.attachSession`，**绝不**碰 `archivedSessionIds`，失败逐条记日志；启动后**只跑一次**（`adoptDelayMs` 默认 5000），可用 `adoptUngrouped: false` 关闭，`dryRun` 下只记日志。
+  - 归位后的会话进入下一轮健康台账快照，于是自动获得「目录消失→归档→回归→挂回」的保护。
+  - 证据：单元 **48/48**（`tests/adopt.test.mjs` 7 项）；真机 **27/27**（装置阶段 1b 备料 + 阶段 6 断言），**先红后绿**（临时 `adoptUngrouped: false` → `FAIL T0 归位…` 26/27，还原后 27/27）。
 - **junction 装载的插件不能 `import` 宿主包**（本机踩实）：profile 里 `node_modules/<插件>` 是 junction 指向本仓库时，Node 按**真实路径**解析嵌套 import，从 `dsh-plugin-workspace-archive\` 往上走够不到 `profiles\node_modules`，于是 `@deepseek-ai/schemastery` 之类直接 `ERR_MODULE_NOT_FOUND`，插件在 DSH 里装载失败（组合层一切正常、只有模块加载报错，而且**应用没有可读日志**，只能靠"插件没跑"倒推）。两条出路：**① 插件零外部依赖**（本项目选的路，见 D009）；② 把包装进 profile 的 node_modules 树里（pnpm 安装/复制），让它能沿目录树往上解析。`dsh-launch-environment` 只是环境快照，**没有**模块解析钩子；`test/register.mjs` 的钩子只在本地测试进程里有效，app 进程没有它。
 
 ## 危险操作边界（越界前必须先问用户）
@@ -41,7 +47,9 @@
 - 不删除、不改名、不移动**任何真实工作区目录**；场景验证一律用一次性临时目录。
 - 不写 `~/.dsh` 下官方 `storages/`、`sessions/` 里的任何文件；归档/恢复只走 `ctx.workspaceRegistry` 官方 API。本插件**自己的** sidecar 只允许写在 `$DSH_HOME/workspace-archive/`（`dshHomePath('workspace-archive', …)`）。
 - 归档前必须先落 sidecar 台账；恢复只处理台账交集，**绝不能**批量 `unarchive` 用户手动归档的会话。
-- 挂回分组只处理**台账快照里的缺席成员**，且**只在"该工作区经历过一次消失"时**下发（判据见上一条）；平时绝不下发。**绝不**按 `cwd` 反查批量归组 —— 那会把用户故意留在「无项目」的会话也塞回去。
+- 挂回分组只处理**台账快照里的缺席成员**，且**只在"该工作区经历过一次消失"时**下发（判据见上一条）；平时绝不下发。
+- **按 `cwd` 反查只在「T0 归位」这一处被允许**，判据必须是"**不在任何**工作区成员表 + `realpath(cwd)` **精确等于**某工作区路径"，并可用 `adoptUngrouped: false` 关闭。除此之外**绝不允许**按 `cwd` 反查接管 —— 尤其在归档/恢复路径里（会把用户留在「无项目」的会话塞回去）。
+- T1 的"离线直写会话 header"属于**独立工具**（用户 2026-10-08 放行）；本插件的**运行时代码仍然只走官方 API**，不得直写 `sessions/`、`storages/`。
 - 挂回分组**不等于**取消归档：除了 `Workspace.attachSession`，**不得**触碰 `archivedSessionIds`；用户手动归档的会话只回到自己的分组，必须保持归档。
 - 不修改 `app.asar`、不修改 profile、不给官方包打补丁。
 - `.recon/` 是只读勘察用的一次性脚本与 asar 展开目录（已 gitignore）；不要把结论留在那里，结论进 `docs/`。

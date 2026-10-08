@@ -80,12 +80,23 @@ test('resolveConfig 拒绝越界值，并接受合法覆盖', () => {
   assert.throws(() => resolveConfig({ pollIntervalMs: 500 }), /pollIntervalMs/)
   assert.throws(() => resolveConfig({ confirmDelayMs: -1 }), /confirmDelayMs/)
   assert.throws(() => resolveConfig({ watch: 'yes' }), /watch/)
+  assert.throws(() => resolveConfig({ adoptUngrouped: 'yes' }), /adoptUngrouped/)
+  assert.throws(() => resolveConfig({ adoptDelayMs: -1 }), /adoptDelayMs/)
   assert.throws(() => resolveConfig({ ledgerFile: '' }), /ledgerFile/)
   assert.throws(() => resolveConfig({ dryRun: 'yes' }), /dryRun/)
-  assert.deepEqual(resolveConfig({ pollIntervalMs: 60000, confirmDelayMs: 0, watch: false, dryRun: false }), {
+  assert.deepEqual(resolveConfig({
     pollIntervalMs: 60000,
     confirmDelayMs: 0,
     watch: false,
+    adoptUngrouped: false,
+    adoptDelayMs: 0,
+    dryRun: false
+  }), {
+    pollIntervalMs: 60000,
+    confirmDelayMs: 0,
+    watch: false,
+    adoptUngrouped: false,
+    adoptDelayMs: 0,
     ledgerFile: 'ledger.json',
     ledgerPath: '',
     dryRun: false

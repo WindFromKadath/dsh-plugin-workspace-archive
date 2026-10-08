@@ -21,6 +21,10 @@ const root = fileURLToPath(new URL('../', import.meta.url))
 const home = join(root, '.verify', 'home')
 const configPath = join(root, '.verify', 'rm', 'cordis.yml')
 const projectDir = join(root, '.verify', 'proj')
+/** T0「无项目 → 按 cwd 归位」的目标工作区（独立于阶段 3–5 用的那个，避免互相干扰）。 */
+const adoptDir = join(root, '.verify', 'proj-adopt')
+/** T0 的反例目录：它**不是**任何工作区，cwd 指向它的会话必须保持「无项目」。 */
+const orphanDir = join(root, '.verify', 'proj-orphan')
 const ledgerFile = join(home, 'workspace-archive', 'ledger.json')
 const registryFile = join(home, 'storages', 'workspace.json')
 const userRegistryFile = join(process.env.USERPROFILE ?? '', '.dsh', 'storages', 'workspace.json')
@@ -77,6 +81,8 @@ await rm(home, { recursive: true, force: true })
 await rm(projectDir, { recursive: true, force: true })
 await mkdir(home, { recursive: true })
 await mkdir(projectDir, { recursive: true })
+await mkdir(adoptDir, { recursive: true })
+await mkdir(orphanDir, { recursive: true })
 
 const userArchivedBefore = await userArchivedCount()
 console.log(`DSH_HOME = ${home}`)
@@ -123,6 +129,29 @@ try {
 
   // B：模拟「用户自己手动归档」，全程都不该被插件动过
   await registry.archiveSession(sessionB)
+
+  // ── 阶段 1b：为 T0「无项目 → 按 cwd 归位」备料 ────────────────────
+  // 第二个工作区 + 两条**未分组**真会话：一条 cwd 命中该工作区路径，一条 cwd 指向
+  // 谁都不是的目录。插件启动后只跑一次归位（默认 5 秒后），所以必须在阶段 2 之前就位。
+  const adoptWorkspace = await registry.create(adoptDir)
+  report.phases.push({ phase: 'create-adopt-workspace', path: adoptWorkspace.path, id: adoptWorkspace.id })
+  const sessionOrphan = `session-${randomUUID()}`
+  const sessionOffTarget = `session-${randomUUID()}`
+  for (const [id, cwd] of [[sessionOrphan, adoptWorkspace.path], [sessionOffTarget, orphanDir]]) {
+    const handle = await persistence.create({
+      version: 4,
+      id,
+      createdAt: Date.now(),
+      cwd,
+      isSeeded: false,
+      delegationDepth: 0
+    })
+    await handle.flush()
+    await handle.close()
+  }
+  check('T0 准备：两条会话确实「无项目」（任何工作区的成员表里都没有）', [sessionOrphan, sessionOffTarget].every(
+    (id) => registry.list().every((workspace) => workspace.sessionIds.includes(id) === false)
+  ), { sessionOrphan, sessionOffTarget })
 
   // ── 阶段 2：健康一轮 → 台账应记下成员 ───────────────────────────
   await sleep(POLL_WAIT_MS)
@@ -191,6 +220,30 @@ try {
     sessionIds: readdedRecord?.sessionIds
   })
   check('重新添加目录：B 仍然归档 —— 挂回分组 ≠ 取消归档', archivedAfterReadd.has(sessionB) === true, { sessionB })
+
+  // ── 阶段 6：T0「无项目 → 按 cwd 归位」────────────────────────────
+  // 插件启动后只跑一次（adoptDelayMs 默认 5 秒）；这里轮询到出现为止，最多等 10 秒。
+  const readRows = async () => Object.values((await readJson(registryFile)).tables.workspaces)
+  let adopted = null
+  for (let i = 0; i < 40 && adopted === null; i++) {
+    const row = (await readRows()).find((entry) => entry.path.toLowerCase() === adoptWorkspace.path.toLowerCase())
+    if (row !== undefined && (row.sessionIds ?? []).includes(sessionOrphan)) adopted = row
+    else await sleep(250)
+  }
+  check('T0 归位：未分组、但 cwd 精确等于工作区路径的会话被插件自动挂回', adopted !== null, {
+    sessionOrphan,
+    workspacePath: adoptWorkspace.path
+  })
+  const rowsAfterAdopt = await readRows()
+  check('T0 归位：cwd 没有对应工作区的会话**不**被塞进任何组（反例）', rowsAfterAdopt.every(
+    (row) => (row.sessionIds ?? []).includes(sessionOffTarget) === false
+  ), { sessionOffTarget })
+  check('T0 归位：只挂一次，成员表里不重复', (adopted?.sessionIds ?? []).filter((id) => id === sessionOrphan).length <= 1, {
+    sessionIds: adopted?.sessionIds
+  })
+  check('T0 归位：不新增工作区记录（归位 ≠ 建组）', rowsAfterAdopt.filter(
+    (row) => row.path.toLowerCase() === adoptWorkspace.path.toLowerCase()
+  ).length === 1, { workspaces: rowsAfterAdopt.map((row) => row.path) })
 
   console.log('\n── 真实注册表（测试 DSH_HOME）──')
   console.log(JSON.stringify({ archivedSessionIds: [...archivedAfterReadd] }, null, 2))

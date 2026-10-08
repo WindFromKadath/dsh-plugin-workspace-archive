@@ -29,6 +29,7 @@ import { watch as fsWatch } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 
+import { adoptUngrouped } from './adopt.js'
 import { LedgerStore, pathKey } from './ledger.js'
 import { createProbeState, evaluate } from './policy.js'
 
@@ -61,6 +62,13 @@ export function resolveConfig(config) {
     confirmDelayMs: raw.confirmDelayMs ?? 3000,
     /** 是否给工作区目录的父目录挂 fs.watch（事件驱动的主要来源之一）。 */
     watch: raw.watch ?? true,
+    /**
+     * 是否在启动后做一次「无项目 → 按 cwd 归位」：把**未分组**且 `cwd` 精确等于某工作区路径的
+     * 会话用官方 `attachSession` 挂回去（见 `src/adopt.js`）。可关。
+     */
+    adoptUngrouped: raw.adoptUngrouped ?? true,
+    /** 归位动作在启动后延迟多久执行（毫秒）：避开官方 registry bootstrap 的自己那一轮。 */
+    adoptDelayMs: raw.adoptDelayMs ?? 5000,
     ledgerFile: raw.ledgerFile ?? 'ledger.json',
     ledgerPath: raw.ledgerPath ?? '',
     dryRun: raw.dryRun ?? true
@@ -73,6 +81,12 @@ export function resolveConfig(config) {
   }
   if (typeof resolved.watch !== 'boolean') {
     throw new TypeError('workspace-archive config watch must be a boolean')
+  }
+  if (typeof resolved.adoptUngrouped !== 'boolean') {
+    throw new TypeError('workspace-archive config adoptUngrouped must be a boolean')
+  }
+  if (!Number.isSafeInteger(resolved.adoptDelayMs) || resolved.adoptDelayMs < 0) {
+    throw new TypeError('workspace-archive config adoptDelayMs must be a non-negative safe integer')
   }
   if (typeof resolved.ledgerFile !== 'string' || resolved.ledgerFile.length === 0) {
     throw new TypeError('workspace-archive config ledgerFile must be a non-empty string')
@@ -494,6 +508,27 @@ export function apply(ctx, config) {
   // 兜底：低频全量对账，防 watcher / 事件漏报。
   scheduleInterval(ctx, run, resolved.pollIntervalMs)
 
+  /**
+   * 「无项目 → 按 cwd 归位」（T0）：**启动后只跑一次**。
+   * `sessionPersistence` 是可选依赖（只读 `list()` 拿 header）；拿不到就什么都不做。
+   * 归位只调官方 `Workspace.attachSession`，失败逐条记日志。
+   */
+  let adopt = () => Promise.resolve([])
+  if (resolved.adoptUngrouped) {
+    const arm = (scope) => {
+      const persistence = typeof scope?.get === 'function' ? scope.get('sessionPersistence') : undefined
+      if (persistence === undefined) return
+      adopt = () => adoptUngrouped({ registry, persistence, logger: ctx?.logger, dryRun: resolved.dryRun })
+      const handle = setTimeout(() => {
+        adopt().catch((error) => ctx?.logger?.warn?.(`workspace-archive: 归位失败 ${String(error)}`))
+      }, resolved.adoptDelayMs)
+      handle?.unref?.()
+      if (typeof scope?.on === 'function') scope.on('dispose', () => clearTimeout(handle))
+    }
+    if (typeof ctx?.inject === 'function') ctx.inject(['sessionPersistence'], arm)
+    else arm(ctx)
+  }
+
   // 卸载时关掉 watcher。
   if (typeof ctx?.effect === 'function') ctx.effect(() => () => engine.dispose(), 'workspace-archive.watchers')
   else if (typeof ctx?.on === 'function') ctx.on('dispose', () => engine.dispose())
@@ -502,10 +537,11 @@ export function apply(ctx, config) {
     'workspace-archive: 已装载（事件驱动 + 兜底轮询）'
       + ` confirmDelayMs=${resolved.confirmDelayMs}`
       + ` watch=${resolved.watch}`
+      + ` adoptUngrouped=${resolved.adoptUngrouped}`
       + ` backstopPollMs=${resolved.pollIntervalMs}`
       + ` dryRun=${resolved.dryRun}`
       + ` ledger=${ledger.file}`
   )
 
-  return { engine, ledger }
+  return { engine, ledger, adopt }
 }
