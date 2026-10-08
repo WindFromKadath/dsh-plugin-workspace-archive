@@ -1,6 +1,6 @@
 # MAINTAINER.md — 作者侧维护入口
 
-面向**维护者**（人 + 后续 agent）。公开读者请先看 [README.md](README.md) / [README.zh-CN.md](README.zh-CN.md)；这里保存作者理解、内部流程、已采纳取舍与证据线索。
+面向**维护者**（人 + 后续 agent）。公开读者请先看 [README.md](README.md)（中文主入口）/ [README.en.md](README.en.md)（English）；这里保存作者理解、内部流程、已采纳取舍与证据线索。
 
 ## 1. 本轮范围与作者视角
 
@@ -67,6 +67,7 @@
 | D013 | 2026-10-07 | **挂回分组与取消归档分成两件事**：`attach` 名单 = 台账快照里**缺席的全部成员**（含消失前就已归档的），只调 `attachSession`、**绝不碰归档集合**；触发条件收紧为"该工作区**经历过一次消失**"（台账 `missingSince` 非空 **或** 官方记录 id 与台账记下的不同），平时绝不下发 | 用户第二轮真机反馈「原本已经归档的对话不会同时归回对应的工作区」：记录被删掉重建后槽位全丢，只恢复"本插件归档过的那批"会漏掉用户归档的那批。判别性断言先红（单测 40/41、真机 FAIL「B 未挂回」）再修 | 已采纳（真机 22/22、单元 41/41） |
 | D014 | 2026-10-08 | **「无项目 → 按 cwd 归位」是独立的一次性动作**（T0）：官方 registry 只在第一次启动时按 `header.cwd` 归组（bootstrap 一次性），此后落单会话没有自愈通道。插件启动后延迟跑一次，判据收紧为「不在任何工作区成员表 + `realpath(cwd)` 精确等于某工作区路径 + cwd 可解析」，只调官方 `attachSession`，可用 `adoptUngrouped: false` 关闭；**归档/恢复路径仍然不许按 cwd 反查** | 用户 2026-10-08 要求"把未分组/不同组的对话迁移"；bootstrap 一次性为源码级事实 | 已采纳（单元 48/48、真机 27/27；先红后绿） |
 | D015 | 2026-10-08 | **T1 真迁移放行，但落点应是独立工具**：跨 cwd 迁移唯一路径是离线改写会话 header 的 `cwd`（用户放行）；生态 `dsh-mv-session` 因硬编码代际 0 文件名（本机全是 `session.v4.jsonl.zstd`）而**不可直接用**，且它的语义是"整工作区改名"，故只借鉴其帧层纯函数；本插件运行时代码**不破**"只走官方 API" | 用户 2026-10-08 选择"放行红线 + T0 开工 + 并行 T1-0"；T1-0 为源码级评估（见 [docs/plan-session-migration.md](docs/plan-session-migration.md) §2.2） | 已采纳（T1 未开工） |
+| D016 | 2026-10-08 | **公开文档语言改为中文为主**：`README.md` = 中文主入口、英文转 `README.en.md`、GitHub About 用中文 | 用户 2026-10-08 直接要求（"DSH 插件主要给国人使用"）；与知识库「GitHub 倾向英文」的约定相反，故在本文件 §6 记明理由与适用范围 | 已采纳 |
 
 ## 5. 现场演示与复现记录
 
@@ -80,9 +81,10 @@
 - 本仓库**本地署名**：`WindFromKadath <294740142+WindFromKadath@users.noreply.github.com>`（2026-10-07 设置，知识库「隐私检查与提交方案」§2）。
 - 隐私检查工具已复制到 [.privacy-tools/](.privacy-tools/)（脚本 + 公共规则 + Hook 模板，**Hook 未启用**）；报告与例外见该目录的 README 与 VERIFICATION。
 - 公开范围：**public + MIT**（用户 2026-10-07 决定）；默认分支 `main`。
-- **已公开**：<https://github.com/WindFromKadath/dsh-plugin-workspace-archive>（2026-10-07 创建并首次推送；远端 14 个提交、HEAD 与本地一致、署名 noreply、GitHub 识别许可证为 MIT、topics 与 description 已写入）。
+- **已公开**：<https://github.com/WindFromKadath/dsh-plugin-workspace-archive>（2026-10-07 创建并首次推送；署名 noreply、GitHub 识别许可证为 MIT、topics 已写入；**仓库简介（About）2026-10-08 改为中文**；远端 HEAD 与本地一致）。
 - 已按知识库流程执行：脱敏（本机路径 / 用户名 / 会话 slug → 占位符）→ 改写全部本地历史（私人邮箱与旧内容）→ 检查只剩工具自身 1 项误报 → 建仓推送 → 回读核验。完整记录见 [.privacy-tools/VERIFICATION.md](.privacy-tools/VERIFICATION.md)。
 - 旧的脱敏前历史只存在于**仓库外**的受控 bundle 备份里，**不要**从它推送任何分支。
+- **平台语言（本项目特例）**：经用户 2026-10-08 批准，本项目**偏离**知识库 2026-10-04 的「GitHub 倾向英文 / `README.md` 为 English 必需主入口」约定 —— `README.md` 是**中文主入口**、`README.en.md` 是英文互链，GitHub 仓库简介（About）也用中文，理由是 DSH 插件的受众主要是国内用户。该偏离只针对本项目，不推广到其它仓库。
 
 ## 7. 待办
 

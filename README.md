@@ -1,62 +1,74 @@
-# dsh plugin workspace archive
+# dsh-plugin-workspace-archive
 
-A [DSH](https://github.com/deepseek ai/deepseek harness) plugin: when a workspace folder is deleted or moved away, **archive** the sessions that belong to it; when the same folder comes back, **bring them back** to that workspace — using official APIs only.
+[DSH](https://github.com/deepseek-ai/deepseek-harness)（DeepSeek Harness）插件：工作区文件夹被**删除或移走**时，把它名下的会话**归档**；同一个文件夹**放回来**时，把这些会话**带回**该工作区 —— 只走官方 API。
 
-中文说明见 [README.zh CN.md](README.zh CN.md)。
+English: [README.en.md](README.en.md)
 
-## The gap this fills
+## 它补的是哪条缝
 
-DSH keeps "folder missing" and "archive" apart on purpose:
+DSH 有意把"目录缺失"和"归档"分开：
 
-  a workspace whose folder cannot be validated — missing, moved, or never recorded — cannot take new sessions, so its sessions fall into **Ungrouped**;
-  removing a project keeps its folder and its session history, but **re adding the same folder starts from an empty project**: the old sessions do not come back.
+- 目录无法校验的工作区（被移动、被删除、从未记录）**无法加入**新会话，其中的会话会散成「无项目」；
+- 「移除项目」保留文件夹与会话历史，但**重新添加同一目录会从空项目开始**：旧会话不会自动回来。
 
-The plugin supplies the missing link. It never touches `app.asar`, never writes the official `storages/` or `sessions/` files, and keeps its own bookkeeping in a sidecar under the DSH home directory.
+本插件补上这条缺失的联动。它不改 `app.asar`、不写官方 `storages/` 与 `sessions/` 文件，自己的记账放在 DSH 主目录下的 sidecar 里。
 
-## What it does
+## 它做什么
 
-| Trigger | Result |
-|   |   |
-| A registered workspace folder is deleted or moved | The sessions **this plugin had recorded** for that path are archived (hidden from the default sidebar view, still reachable under "all conversations") |
-| The workspace registration is removed ("Delete workspace") while the folder stays | Treated the same as a disappearance, and archived — otherwise those conversations fall into "no project" |
-| The folder or the registration comes back | The sessions this plugin archived are **unarchived**; and **every member recorded in the plugin's ledger** is re attached to the workspace at that path — including sessions that were **already archived before the disappearance** (typically ones you archived yourself) |
-| A session sits in "Ungrouped" but its working directory **is** a registered workspace path | It is attached to that workspace once, at start up (condition: in no workspace's member list + the directory matches **exactly**; disable with `adoptUngrouped: false`) |
+| 触发 | 结果 |
+|---|---|
+| 已登记的工作区目录被删除或移走 | 把该路径下**由本插件登记过的**会话归档（侧栏默认视图不再显示，在"全部对话"里仍可见） |
+| 工作区登记被移除（菜单里的「删除工作区」，文件夹还在） | 同样视为消失并归档 —— 否则那些对话会散成「无项目」 |
+| 目录或登记**回来** | 本插件归档过的那批会话**取消归档**；并且**台账里记过的全部成员**都会被挂回该路径的工作区 —— 包括**在消失之前就已经归档**的会话（典型是你自己手动归档的） |
+| 一条会话待在「无项目」里，但它的工作目录**就是**某个已登记工作区的路径 | 启动后**自动挂回**该工作区（判据：不在任何工作区的成员表 + 目录**精确相等**；可用 `adoptUngrouped: false` 关闭） |
 
-Two rules the plugin always keeps:
+两条永不违反的规则：
 
-  **Sessions you archived yourself are never unarchived.** They only get their grouping back, and stay hidden until you unarchive them.
-- **Archive and restore only ever handle sessions it has recorded.** The ledger is written while the plugin runs and the workspace is healthy, and that path never scans by working directory. The one exception is the start-up **adoption** pass: it attaches only sessions that belong to no workspace and whose working directory **exactly equals** a registered workspace path — turn it off with `adoptUngrouped: false`.
+- **你自己归档的会话永远不会被取消归档**：它们只是回到自己的分组里，仍然隐藏，直到你手动取消归档；
+- **归档 / 恢复只处理它记过账的会话**：台账是插件运行期间、工作区健康时写下的；这条路径**绝不**按工作目录反查。唯一的例外是启动后那一次**归位**：只把**工作目录精确等于**某已登记工作区路径、且不属于任何工作区的会话挂回去，可用 `adoptUngrouped: false` 关闭。
 
-## Requirements
+## 它为什么做得成（关键机制）
 
-  DSH (DeepSeek Harness) desktop or CLI; developed and verified against `0.2.0 rc.2`.
-  Node.js 22.5+ (the host provides it).
-  **No runtime dependencies.** The plugin imports nothing outside Node's standard library — on purpose: a plugin loaded through a directory link resolves nested imports by real path and cannot reach the host's packages.
+因为这条能力**不需要改任何文件**：DSH 里"会话属于哪个组"存在**工作区记录的一份成员表**里，而官方恰好提供了往这份表里补一笔的 API（`Workspace.attachSession`）。
 
-## Install
+1. **分组是"名册"，不是"档案"里的字段。** 会话日志里写的是它自己的工作目录；"它显示在哪个工作区下"是工作区记录里的成员表 —— 改分组 = 改名册，官方允许。
+2. **官方挂载只校验一个条件，而这个条件天然成立。** `attachSession` 会读会话 header 的 `cwd`，要求它**规范化后精确等于**该工作区路径，否则拒绝；而"无项目"里的孤会话，cwd 本来就等于那个路径 —— 官方自己会放行（它也顺手代我们复核了一遍，塞错组在机制上不可能）。
+3. **"没在名册上"是官方自己留下的空洞。** 官方只在**第一次启动**时按 cwd 把已有会话归组一次（bootstrap 一次性，写完 initialized 标记就不再跑），此后新增的工作区不会再回头认领旧会话 —— 这正是本插件补的那一步。
 
-The plugin is not published to npm yet. Two supported ways:
+而"把会话从一个工作区迁到另一个工作区"**做不到**（在只走官方 API 的前提下）：那要求改 `cwd` 本身，可它是写死在会话日志里的，官方没有任何改 `cwd` 的 API。详见 [docs/recon/05-migration-and-multi-folder.md](docs/recon/05-migration-and-multi-folder.md) 与 [docs/plan-session-migration.md](docs/plan-session-migration.md)。
 
-1. **From a local checkout** (what this repository verifies): link the directory into a profile's `node_modules` and add the package name to the profile manifest. On this machine, `.verify/install desktop.mjs` does all four steps and can be rolled back with `  uninstall`.
-2. **From this repository** (documented, not yet verified here): the official plugin manager accepts a GitHub spec, for example `dsh plugin add github:WindFromKadath/dsh plugin workspace archive#<commit>`. Because the plugin has no dependencies, an installed copy behaves like the linked one.
+## 环境要求
 
-**A restart is required.** The plugin row and its bundle are fixed at host start up; HMR never hot loads them. Configuration defaults live in `resolveConfig` in [src/index.js](src/index.js); a profile patch row can override `dryRun`, `confirmDelayMs`, `pollIntervalMs` and `watch`.
+- DSH（DeepSeek Harness）桌面版或 CLI；开发与验证基线是 `0.2.0-rc.2`。
+- Node.js 22.5+（由宿主提供）。
+- **零运行时依赖**：插件不 import 标准库以外的任何东西 —— 这是刻意的：通过目录联接装载的插件按真实路径解析嵌套 import，够不到宿主自带的包。
 
-## Verification
+## 安装
 
-  `npm test` — 48 offline assertions (tool behaviour, the decision layer, the ledger, real Cordis loading, and the "plugin source must not import host packages" regression).
-  `npm run rm test` — 27 assertions against a **real** DSH runtime in a throwaway `DSH_HOME`: create workspace → create two real sessions → delete the folder → assert exactly the right session is archived → put the folder back → assert it is restored and re attached, while a session archived by the "user" stays archived.
-  `npm run check` — syntax.
+本插件尚未发布到 npm。两种方式：
 
-Both suites are re runnable and never touch a real profile or a real workspace folder. See [MAINTAINER.md](MAINTAINER.md) for the design constraints, adopted decisions and evidence trail.
+1. **从本地检出安装**（本仓库验证的就是这条）：把目录联接进 profile 的 `node_modules`，并把包名写进 profile 清单。本机用 `.verify/install-desktop.mjs` 一次完成这四步，`--uninstall` 可回滚。
+2. **从本仓库安装**（已写入文档，本仓库尚未实测）：官方插件管理器接受 GitHub 规格，例如 `dsh plugin add github:WindFromKadath/dsh-plugin-workspace-archive#<commit>`。由于插件没有依赖，装进去的副本与联接版行为一致。
 
-## Limitations
+**必须重启宿主/应用**：插件行与 bundle 在启动时固定，HMR 从不热装载。配置默认值在 [src/index.js](src/index.js) 的 `resolveConfig`；profile 的 patch 行可以覆盖 `dryRun`、`confirmDelayMs`、`pollIntervalMs`、`watch`、`adoptUngrouped`、`adoptDelayMs`。
 
-  **Only sessions the plugin has recorded.** If the delete and re add happens while the plugin is not running, it knows only the last snapshot in its ledger: members present in that snapshot are re attached, older strays are not.
-  **Re attaching is not unarchiving.** `attach` only touches the workspace member table; it never touches the archive set.
-  No session deletion, no folder deletion, no cross machine sync.
-  A renamed folder is a different path: attaching validates `cwd === workspace path`, and the plugin only logs when it does not match.
+## 验证
 
-## License
+- `npm test` —— **48 项**离线断言（工具行为、决策层、台账、真 Cordis 装载、"无项目归位"的选择逻辑，以及"插件源码不得 import 宿主包"的回归）。
+- `npm run rm-test` —— **27 项**针对**真** DSH 运行时（一次性 `DSH_HOME`）的断言：建工作区 → 建两个真会话 → 删目录 → 断言只归档该归档的那个 → 放回目录 → 断言它被恢复并挂回工作区，而"用户手动归档"的那个**保持归档** → 删除登记再重新添加 → 断言都回到分组 → 未分组的孤会话被自动归位。
+- `npm run check` —— 语法。
 
-MIT — see [LICENSE](LICENSE).
+两套都可在本仓库一键重跑，且**不碰真实 profile、不碰真实工作区目录**。设计约束、已采纳决策与证据线索见 [MAINTAINER.md](MAINTAINER.md)。
+
+## 已知限制
+
+- **归档 / 恢复只认它记过账的会话**：若"删除 → 重新添加"发生在插件没运行的时候，它只认得台账里最后一次快照 —— 快照里有的成员会被挂回，更早散掉的不会（这类可以由启动时的**归位**补上，前提是 cwd 仍等于该工作区路径）。
+- **挂回分组 ≠ 取消归档**：`attach` 只动工作区成员表，从不碰归档集合。
+- **归位只跑一次**（启动后延迟 5 秒）：之后新出现的孤会话要等下次重启。
+- **跨工作区迁移不在本插件范围内**：需要离线改写会话日志，官方无此通道。
+- 不做会话删除、不删文件夹、不做跨机器同步。
+- 目录被**改名**等于换了一个路径：挂回时官方会校验 cwd，对不上时插件只记日志、不改数据。
+
+## 许可证
+
+MIT —— 见 [LICENSE](LICENSE)。
