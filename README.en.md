@@ -45,10 +45,17 @@ Moving a session **from one workspace to another** is *not* possible this way: i
 
 ## Install
 
-The plugin is not published to npm yet. Two supported ways:
+Three ways, the first one recommended:
 
-1. **From a local checkout** (what this repository verifies): link the directory into a profile's `node_modules` and add the package name to the profile manifest. On this machine, `.verify/install-desktop.mjs` does all four steps and can be rolled back with `--uninstall`.
-2. **From this repository** (documented, not yet verified here): the official plugin manager accepts a GitHub spec, for example `dsh plugin add github:WindFromKadath/dsh-plugin-workspace-archive#<commit>`. Because the plugin has no dependencies, an installed copy behaves like the linked one.
+1. **From npm (recommended; `0.1.0` published 2026-10-08)**
+
+   ```
+   dsh plugin add dsh-plugin-workspace-archive
+   ```
+
+   The plugin manager uses the npm registry (official registry, falling back to `registry.npmmirror.com`; both were verified in sync). Pin a version with `dsh-plugin-workspace-archive@<version>`.
+2. **From a local checkout** (what this repository's real-machine tests use): link the directory into a profile's `node_modules` and add the package name to the profile manifest. On this machine, `.verify/install-desktop.mjs` does all four steps and can be rolled back with `--uninstall`.
+3. **From this repository by commit**: the official plugin manager also accepts a GitHub spec, for example `dsh plugin add github:WindFromKadath/dsh-plugin-workspace-archive#<commit>`.
 
 **A restart is required.** The plugin row and its bundle are fixed at host start-up; HMR never hot-loads them. Configuration defaults live in `resolveConfig` in [src/index.js](src/index.js); a profile patch row can override `dryRun`, `confirmDelayMs`, `pollIntervalMs`, `watch`, `adoptUngrouped` and `adoptDelayMs`.
 

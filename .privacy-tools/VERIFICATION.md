@@ -63,3 +63,18 @@
 - 改写脚本与运行输出：`<受控备份目录>/rewrite-history.ps1`
 - 隐私检查报告原文：`<受控备份目录>/pa-index.txt`、`pa-history.txt`
 - 改写前的旧提交编号只存在于上述受控位置，**不写入本仓库任何文件**。
+
+## 6. npm 发布与检索核验（2026-10-08）
+
+| 项 | 结果 |
+|---|---|
+| 包名 | `dsh-plugin-workspace-archive`（发布前 registry 404 = 名称空着） |
+| 发布方式 | **npm 分阶段发布**：先落占位版本 `0.0.0-stage`（`"stub": true`，2 文件 / 350 字节，npm 自带的"等待 staged release"占位包），再由账号在网页用**通行密钥**批准 |
+| 时间 | 占位 `2026-10-08T16:22:01Z` → `0.1.0` 生效 `16:24:10Z`；`dist-tags.latest = 0.1.0` |
+| 登录身份 | npm 账号 `windfromkadath`；`maintainers` 字段公开账号邮箱（用户 2026-10-08 决定接受） |
+| 产物核验 | 从 registry 下载 tarball：**9 个文件**、sha1 `58e6b052f9e784098f3b9e27029a28c5a3f173f0` **与本地打包一致**；隔离安装成功；导入已安装副本跑出 `resolveConfig`（含 `adoptUngrouped: true`）✔ |
+| 镜像 | `registry.npmmirror.com` **已同步 `0.1.0`**（DSH 插件管理器的回退源） |
+| npm 搜索索引 | 发布后约 6 分钟仍**未收录**（`/-/v1/search` 只返回模糊结果）→ 索引滞后，**待复检** |
+| 发现通道 | 官方包内 grep **无** `v1/search` / 市场检索实现（`dsh-plugin-manager` 只有 list/inspect/install）⇒ "按话题检索"发生在 npm 搜索与第三方目录（dshbase、dsh-plugin-market、awesome 列表），载体是 npm 关键词 `dsh-plugin` + GitHub topic `dsh-plugin`（本项目两者都有） |
+
+**下次发布的操作要点**：账号 2FA 只有安全密钥/通行密钥时 CLI 拿不到 6 位 OTP ⇒ 用**带 Bypass 2FA 的 Granular Token** 覆盖 `_authToken`，或走**分阶段发布 + 网页批准**；在受限沙箱里跑 npm 必须加 `--cache`（默认缓存在工作区外会被拒）。

@@ -45,10 +45,17 @@ DSH 有意把"目录缺失"和"归档"分开：
 
 ## 安装
 
-本插件尚未发布到 npm。两种方式：
+三种方式，推荐第一种：
 
-1. **从本地检出安装**（本仓库验证的就是这条）：把目录联接进 profile 的 `node_modules`，并把包名写进 profile 清单。本机用 `.verify/install-desktop.mjs` 一次完成这四步，`--uninstall` 可回滚。
-2. **从本仓库安装**（已写入文档，本仓库尚未实测）：官方插件管理器接受 GitHub 规格，例如 `dsh plugin add github:WindFromKadath/dsh-plugin-workspace-archive#<commit>`。由于插件没有依赖，装进去的副本与联接版行为一致。
+1. **从 npm 安装（推荐，2026-10-08 已发布 `0.1.0`）**
+
+   ```
+   dsh plugin add dsh-plugin-workspace-archive
+   ```
+
+   插件管理器走 npm registry（官方源，回退 `registry.npmmirror.com`；两侧实测都已同步）。想钉版本就写 `dsh-plugin-workspace-archive@<version>`。
+2. **从本地检出安装**（本仓库真机验证用的就是这条）：把目录联接进 profile 的 `node_modules`，并把包名写进 profile 清单。本机用 `.verify/install-desktop.mjs` 一次完成这四步，`--uninstall` 可回滚。
+3. **从本仓库按提交安装**：官方插件管理器也接受 GitHub 规格，例如 `dsh plugin add github:WindFromKadath/dsh-plugin-workspace-archive#<commit>`。
 
 **必须重启宿主/应用**：插件行与 bundle 在启动时固定，HMR 从不热装载。配置默认值在 [src/index.js](src/index.js) 的 `resolveConfig`；profile 的 patch 行可以覆盖 `dryRun`、`confirmDelayMs`、`pollIntervalMs`、`watch`、`adoptUngrouped`、`adoptDelayMs`。
 

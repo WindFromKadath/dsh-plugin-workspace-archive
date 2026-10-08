@@ -68,6 +68,7 @@
 | D014 | 2026-10-08 | **「无项目 → 按 cwd 归位」是独立的一次性动作**（T0）：官方 registry 只在第一次启动时按 `header.cwd` 归组（bootstrap 一次性），此后落单会话没有自愈通道。插件启动后延迟跑一次，判据收紧为「不在任何工作区成员表 + `realpath(cwd)` 精确等于某工作区路径 + cwd 可解析」，只调官方 `attachSession`，可用 `adoptUngrouped: false` 关闭；**归档/恢复路径仍然不许按 cwd 反查** | 用户 2026-10-08 要求"把未分组/不同组的对话迁移"；bootstrap 一次性为源码级事实 | 已采纳（单元 48/48、真机 27/27；先红后绿） |
 | D015 | 2026-10-08 | **T1 真迁移放行，但落点应是独立工具**：跨 cwd 迁移唯一路径是离线改写会话 header 的 `cwd`（用户放行）；生态 `dsh-mv-session` 因硬编码代际 0 文件名（本机全是 `session.v4.jsonl.zstd`）而**不可直接用**，且它的语义是"整工作区改名"，故只借鉴其帧层纯函数；本插件运行时代码**不破**"只走官方 API" | 用户 2026-10-08 选择"放行红线 + T0 开工 + 并行 T1-0"；T1-0 为源码级评估（见 [docs/plan-session-migration.md](docs/plan-session-migration.md) §2.2） | 已采纳（T1 未开工） |
 | D016 | 2026-10-08 | **公开文档语言改为中文为主**：`README.md` = 中文主入口、英文转 `README.en.md`、GitHub About 用中文 | 用户 2026-10-08 直接要求（"DSH 插件主要给国人使用"）；与知识库「GitHub 倾向英文」的约定相反，故在本文件 §6 记明理由与适用范围 | 已采纳 |
+| D017 | 2026-10-08 | **npm 发布走分阶段发布 + 网页批准**：账号 2FA 只有安全密钥（通行密钥）⇒ CLI 无 OTP 可用，故用分阶段发布上传、在网页用通行密钥批准 | 实测：`npm publish` 报 E403（要求 2FA 或 bypass 令牌）、`--otp=` 报 EOTP；网页 `Staged Packages` 可批准 | 已采纳（`0.1.0` 已生效） |
 
 ## 5. 现场演示与复现记录
 
@@ -85,6 +86,8 @@
 - 已按知识库流程执行：脱敏（本机路径 / 用户名 / 会话 slug → 占位符）→ 改写全部本地历史（私人邮箱与旧内容）→ 检查只剩工具自身 1 项误报 → 建仓推送 → 回读核验。完整记录见 [.privacy-tools/VERIFICATION.md](.privacy-tools/VERIFICATION.md)。
 - 旧的脱敏前历史只存在于**仓库外**的受控 bundle 备份里，**不要**从它推送任何分支。
 - **平台语言（本项目特例）**：经用户 2026-10-08 批准，本项目**偏离**知识库 2026-10-04 的「GitHub 倾向英文 / `README.md` 为 English 必需主入口」约定 —— `README.md` 是**中文主入口**、`README.en.md` 是英文互链，GitHub 仓库简介（About）也用中文，理由是 DSH 插件的受众主要是国内用户。该偏离只针对本项目，不推广到其它仓库。
+- **npm 已发布**：`dsh-plugin-workspace-archive@0.1.0`（2026-10-08，走**分阶段发布 + 网页通行密钥批准**；`latest=0.1.0`、npmmirror 已同步、tarball sha1 与本地打包一致）。明细见 [.privacy-tools/VERIFICATION.md](.privacy-tools/VERIFICATION.md) §6。
+- **可检索性**：关键词含生态通用的 `dsh-plugin`（+ `deepseek-harness`/`cordis`/`workspace`/`session`/`archive`），GitHub topic 也带 `dsh-plugin`；**npm 搜索索引对新包有滞后**（发布后数分钟仍未收录，待复检）。DSH 官方**没有**内置市场/按话题检索，发现通道是 npm 搜索 + 第三方目录。
 
 ## 7. 待办
 
