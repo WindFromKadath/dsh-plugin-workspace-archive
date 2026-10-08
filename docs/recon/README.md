@@ -134,6 +134,7 @@
 | [03-ecosystem.md](03-ecosystem.md) | 生态检索（官方通道 + 91 个外链 + ①/② 占位判定） |
 | [03b-ecosystem-npm.md](03b-ecosystem-npm.md) | npm registry 定向检索（10 条查询 + 7 份 packument README） |
 | [04-plugin1-prior-art.md](04-plugin1-prior-art.md) | 本机 plugin-1（`dsh-plugin-branch`）先例、可复用代码、宿主坑 |
+| [05-migration-and-multi-folder.md](05-migration-and-multi-folder.md) | **2026-10-08 追加**：跨工作区**迁移会话**、一工作区**多文件夹**为什么做不到 —— 官方通道逐条源码排除（带 `包/文件:行号`）、生态先占者，以及若要做各条路线的代价 |
 | （`.recon/asar.mjs`） | 本次使用的只读 asar 取值工具 |
 
 > 说明：`01` 的关键结论（标题三来源、单提供方、`session/title` 事件、`title`/`titleInput` 投影、`all-prompts` 未装载、`refresh()` 无调用方）已由 Lead 用源码与解帧实测复核；`01` 中的全量统计数字（150 会话 / 20% 静默回退 / 子代理会话不跑标题）为子代理单方实测，未逐条复核。

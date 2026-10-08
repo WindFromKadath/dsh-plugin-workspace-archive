@@ -30,6 +30,10 @@
   - `attach` 名单 = 台账快照里缺席的成员，**含在消失之前就已经归档的**（典型是用户自己手动归档的）：只调 `Workspace.attachSession`，**绝不碰 `archivedSessionIds`** —— 归档会话只是回到自己的分组，仍然隐藏。
   - `attachSession` 是**前插**，所以按**倒序**挂回才能保持原来的相对顺序；它自带 `cwd === record.path` 校验（`dsh-workspace/lib/index.js:111-129`），目录被改名等对不上的情形抛错 → 只记日志、继续处理其余会话。
   - 边界：插件只认**台账里记过的**会话，从不按 `cwd` 反查批量接管。
+- **两条"看着该做"的能力做不到，别再重复调研**（2026-10-08，逐条源码依据见 [docs/recon/05-migration-and-multi-folder.md](docs/recon/05-migration-and-multi-folder.md)）：
+  - **跨工作区迁移会话**（例：Rust → DeepSeekHarness）：官方**无通道** —— `attachSession` 要求 `cwd === 工作区路径`（`dsh-workspace/lib/index.js:111-129`）、`insertSessionBefore` 只能**组内排序**（`:130-147`）、官方客户端拖拽**只能同组**（`dsh-client-ui-workspace/lib/client.js:2545-2546`）、`fork` 落回**源**工作区（`dsh-api-session-controller/lib/types/commands.js:519-531`）。唯一实现方式是直写 `sessions/` 里的 header `cwd` —— **破本插件"只走官方 API"的红线**，且生态已有 `birdmanhj/dsh-mv-session`（需停机 + 重启）。
+  - **一个工作区多文件夹**：官方沙盒策略是**单根**（`SandboxExecutionPolicy.workspaceRoot: string`，`dsh-sandbox/lib/types/index.d.ts:27-31`；可写根 = 该根 + 临时目录，`lib/index.js:166-173`；每轮根来自会话 cwd，`dsh-sandbox-policy/lib/index.js:141-148`），官方 ACP 层**明文拒绝** `additionalDirectories`（`dsh-acp/lib/index.js:1412`），且软链/junction 绕不过围栏（`dsh-fs-sandbox/lib/index.js:160` 每次写入重新规范化目标）。多根由第三方 `@chaoset/sandbox-extra-roots` 补，依赖它会破本插件"零依赖"。
+  - **可用且未实施的官方子集**："无项目 → 按 `cwd` 归位"（`header.cwd` 与某已登记工作区 realpath 等值 → `attachSession`）。
 - **junction 装载的插件不能 `import` 宿主包**（本机踩实）：profile 里 `node_modules/<插件>` 是 junction 指向本仓库时，Node 按**真实路径**解析嵌套 import，从 `dsh-plugin-workspace-archive\` 往上走够不到 `profiles\node_modules`，于是 `@deepseek-ai/schemastery` 之类直接 `ERR_MODULE_NOT_FOUND`，插件在 DSH 里装载失败（组合层一切正常、只有模块加载报错，而且**应用没有可读日志**，只能靠"插件没跑"倒推）。两条出路：**① 插件零外部依赖**（本项目选的路，见 D009）；② 把包装进 profile 的 node_modules 树里（pnpm 安装/复制），让它能沿目录树往上解析。`dsh-launch-environment` 只是环境快照，**没有**模块解析钩子；`test/register.mjs` 的钩子只在本地测试进程里有效，app 进程没有它。
 
 ## 危险操作边界（越界前必须先问用户）
