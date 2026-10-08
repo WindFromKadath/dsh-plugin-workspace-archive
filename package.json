@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-workspace-archive",
   "version": "0.1.0",
-  "description": "DSH 插件：工作区目录消失时自动归档该目录下由本插件登记的会话，目录回归时按台账恢复（只走官方 workspaceRegistry API）。",
+  "description": "DSH 插件：工作区目录被删/移走时自动归档其会话，目录回归时恢复（取消归档 + 把成员挂回分组）；并把「无项目」里工作目录匹配的会话归位。只走官方 API、零运行时依赖。",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -11,11 +11,34 @@
   "files": [
     "src",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "README.en.md"
   ],
   "license": "MIT",
+  "author": "WindFromKadath <294740142+WindFromKadath@users.noreply.github.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WindFromKadath/dsh-plugin-workspace-archive.git"
+  },
+  "homepage": "https://github.com/WindFromKadath/dsh-plugin-workspace-archive#readme",
+  "bugs": {
+    "url": "https://github.com/WindFromKadath/dsh-plugin-workspace-archive/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "workspace",
+    "session",
+    "archive"
+  ],
   "engines": {
     "node": ">=22.5"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
     "check": "node --check src/index.js",
@@ -26,6 +49,9 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "engines": {
+      "dsh": ">=0.2.0-rc.2 <0.3.0"
     }
   }
 }
