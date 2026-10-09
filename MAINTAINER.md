@@ -88,6 +88,7 @@
 - **平台语言（本项目特例）**：经用户 2026-10-08 批准，本项目**偏离**知识库 2026-10-04 的「GitHub 倾向英文 / `README.md` 为 English 必需主入口」约定 —— `README.md` 是**中文主入口**、`README.en.md` 是英文互链，GitHub 仓库简介（About）也用中文，理由是 DSH 插件的受众主要是国内用户。该偏离只针对本项目，不推广到其它仓库。
 - **npm 已发布**：`dsh-plugin-workspace-archive@0.1.0`（2026-10-08，走**分阶段发布 + 网页通行密钥批准**；`latest=0.1.0`、npmmirror 已同步、tarball sha1 与本地打包一致）。明细见 [.privacy-tools/VERIFICATION.md](.privacy-tools/VERIFICATION.md) §6。
 - **可检索性**：关键词含生态通用的 `dsh-plugin`（+ `deepseek-harness`/`cordis`/`workspace`/`session`/`archive`），GitHub topic 也带 `dsh-plugin`；**npm 搜索索引对新包有滞后**（发布后数分钟仍未收录，待复检）。DSH 官方**没有**内置市场/按话题检索，发现通道是 npm 搜索 + 第三方目录。
+- **精选列表已投稿**（2026-10-09）：向 `awesome-dsh-plugin/awesome-dsh-plugin` 提了 PR **#6923**（单文件 `data/plugins/WindFromKadath__dsh-plugin-workspace-archive.yml`，`category: session`）。该列表 gate（`scripts/check-submission.mjs`）只查 `dsh.bundle` / 仓库满 1 天 / 存在且未归档 / 非 DSH 本仓，**不看 star 或下载量**；展示用的 stars/downloads 由 `build-site.yml` 每日 cron 自动抓取，因此**插件升级不需要回来改条目**（只有"描述不再准确"才需要提一个小 PR）。
 
 ## 7. 待办
 
