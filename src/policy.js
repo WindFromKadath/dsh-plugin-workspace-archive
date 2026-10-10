@@ -19,6 +19,13 @@
  * 仍是消失且已过 `confirmDelayMs` 就归档。事件驱动（秒级触发）与兜底轮询共用这一套判定，
  * `confirmDelayMs = 0` 即"发现即归档"。
  *
+ * **唯一例外：权威事件 + 本进程亲眼见过。** 当 `reason === 'unregistered'`（官方注册表说这条
+ * 登记没了）且 `wasRegistered(path)` 为真（本进程曾在 `registry.list()` 里见过它）时，这次消失
+ * 是用户的明确动作（菜单「删除工作区」），**不等窗口、立即归档**。理由：官方删除登记是即时的，
+ * 那批会话会立刻散成「无项目」并出现在侧栏；等窗口就是让用户盯着这段中间态看 3 秒。
+ * 反之（本进程没见过它）必须退回窗口 —— 插件刚启动、注册表还在 bootstrap 时，"不在 list() 里"
+ * 与"被删了"无法区分。
+ *
  * @module dsh-plugin-workspace-archive/policy
  */
 
@@ -29,7 +36,8 @@ export function createProbeState() {
 
 /**
  * 计算这一轮的动作。
- * @param options - `observations` / `state` / `ledger` / `confirmDelayMs` / `now` / `alreadyArchived`。
+ * @param options - `observations` / `state` / `ledger` / `confirmDelayMs` / `now` / `alreadyArchived`
+ *   / `wasRegistered`（谓词：本进程是否见过该路径出现在 `registry.list()` 里）。
  * @returns `{ actions, state }`（state 为新的确认状态）。
  */
 export function evaluate(options) {
@@ -37,6 +45,8 @@ export function evaluate(options) {
   const confirmDelayMs = options.confirmDelayMs ?? 0
   const now = options.now ?? Date.now()
   const alreadyArchived = options.alreadyArchived ?? new Set()
+  /** 默认"从未见过"：调用方没提供时一律走确认窗口（保守）。 */
+  const wasRegistered = options.wasRegistered ?? (() => false)
   const next = { missingSince: new Map(state?.missingSince ?? []) }
   const actions = []
 
@@ -78,11 +88,18 @@ export function evaluate(options) {
     }
 
     const since = next.missingSince.get(path)
-    if (since === undefined) {
-      next.missingSince.set(path, now) // 第一次看到消失：开始计时，先不动手
-      continue
+    // 权威事件 + 本进程亲眼见过这条登记 ⇒ 用户的明确动作，立即归档，不等窗口。
+    // 否则一律走时间型确认（含"本进程没见过"这一保守分支）。
+    const authoritative = observation.reason === 'unregistered' && wasRegistered(path) === true
+    if (authoritative) {
+      next.missingSince.delete(path)
+    } else {
+      if (since === undefined) {
+        next.missingSince.set(path, now) // 第一次看到消失：开始计时，先不动手
+        continue
+      }
+      if (now - since < confirmDelayMs) continue // 确认窗口内：再等等
     }
-    if (now - since < confirmDelayMs) continue // 确认窗口内：再等等
 
     const pending = entry.archivedSessionIds ?? []
     // 已在官方归档集合里的会话**不是我们的账**：那是用户（或别的插件）手动归档的，

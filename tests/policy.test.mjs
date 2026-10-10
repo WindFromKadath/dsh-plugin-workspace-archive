@@ -112,6 +112,74 @@ test('登记被移除（reason=unregistered）同样归档，并带上原因', (
   ])
 })
 
+test('登记被移除 + 本进程见过它登记过 → 立即归档，不等确认窗口', () => {
+  const ledger = fakeLedger()
+  const state = seed(ledger)
+  // 窗口 3 秒，但本进程亲眼见过这条登记 ⇒ 这是用户的明确动作，第一轮就归档。
+  // 不等窗口的理由：官方删除登记是即时的，那批会话会立刻散成「无项目」并出现在侧栏。
+  const { actions } = evaluate({
+    observations: observation(false, 'unregistered'),
+    state,
+    confirmDelayMs: 3000,
+    now: 1000,
+    ledger,
+    wasRegistered: (path) => path === '<repo>\\proj'
+  })
+  assert.deepEqual(actions, [
+    { kind: 'archive', path: '<repo>\\proj', sessionIds: ['s1', 's2'], reason: 'unregistered' }
+  ])
+})
+
+test('登记被移除但本进程从未见过（刚启动、注册表还在 bootstrap）→ 保守走确认窗口', () => {
+  const ledger = fakeLedger()
+  const state = seed(ledger)
+  // 反例：没有这条闸门时，"注册表还没铺完"会被当成"登记被删了"直接误归档。
+  const first = evaluate({
+    observations: observation(false, 'unregistered'),
+    state,
+    confirmDelayMs: 3000,
+    now: 1000,
+    ledger,
+    wasRegistered: () => false
+  })
+  assert.deepEqual(first.actions, [], '没见过 → 先只计时，不动手')
+
+  const early = evaluate({
+    observations: observation(false, 'unregistered'),
+    state: first.state,
+    confirmDelayMs: 3000,
+    now: 2000,
+    ledger,
+    wasRegistered: () => false
+  })
+  assert.deepEqual(early.actions, [], '窗口内不得归档')
+
+  const late = evaluate({
+    observations: observation(false, 'unregistered'),
+    state: first.state,
+    confirmDelayMs: 3000,
+    now: 4500,
+    ledger,
+    wasRegistered: () => false
+  })
+  assert.equal(late.actions.length, 1, '窗口到点后仍要归档')
+})
+
+test('目录缺失（folder-missing）即使本进程见过该登记，也一定走确认窗口', () => {
+  const ledger = fakeLedger()
+  const state = seed(ledger)
+  // stat 会抖（网络盘、改名中途）⇒ 这条判据永远需要时间确认，闸门只对权威事件生效。
+  const { actions } = evaluate({
+    observations: observation(false, 'folder-missing'),
+    state,
+    confirmDelayMs: 3000,
+    now: 1000,
+    ledger,
+    wasRegistered: () => true
+  })
+  assert.deepEqual(actions, [])
+})
+
 test('目录回归：只恢复本插件归档过的交集，不碰用户手动归档', () => {
   const ledger = fakeLedger({ '<repo>\\proj': { path: '<repo>\\proj', title: 'proj', sessionIds: [], missingSince: 'T', archivedSessionIds: ['s1'] } })
   const { actions } = evaluate({ observations: observation(true), state: createProbeState(), confirmDelayMs: 0, now: 0, ledger })

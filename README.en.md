@@ -18,7 +18,7 @@ The plugin supplies the missing link. It never touches `app.asar`, never writes 
 | Trigger | Result |
 |---|---|
 | A registered workspace folder is deleted or moved | The sessions **this plugin had recorded** for that path are archived (hidden from the default sidebar view, still reachable under "all conversations") |
-| The workspace registration is removed ("Delete workspace") while the folder stays | Treated the same as a disappearance, and archived — otherwise those conversations fall into "no project" |
+| The workspace registration is removed ("Delete workspace") while the folder stays | Treated the same as a disappearance, and archived — otherwise those conversations fall into "no project". **This one skips the confirmation window**: the official removal is immediate, so waiting would leave those conversations scattered in the sidebar in front of you |
 | The folder or the registration comes back | The sessions this plugin archived are **unarchived**; and **every member recorded in the plugin's ledger** is re-attached to the workspace at that path — including sessions that were **already archived before the disappearance** (typically ones you archived yourself) |
 | A session sits in "Ungrouped" but its working directory **is** a registered workspace path | It is attached to that workspace once, at start-up (condition: in no workspace's member list + the directory matches **exactly**; disable with `adoptUngrouped: false`) |
 
@@ -61,7 +61,7 @@ Three ways, the first one recommended:
 
 ## Verification
 
-- `npm test` — **48 offline assertions** (tool behaviour, the decision layer, the ledger, real Cordis loading, the adoption selection logic, and the "plugin source must not import host packages" regression).
+- `npm test` — **52 offline assertions** (tool behaviour, the decision layer, the ledger, real Cordis loading, the adoption selection logic, the two-tier disappearance confirmation, and the "plugin source must not import host packages" regression).
 - `npm run rm-test` — **27 assertions against a real DSH runtime** in a throwaway `DSH_HOME`: create workspace → create two real sessions → delete the folder → assert exactly the right session is archived → put the folder back → assert it is restored and re-attached, while a session archived by the "user" stays archived → delete the registration and re-add it → assert both come back to the group → an ungrouped orphan session is adopted.
 - `npm run check` — syntax.
 
@@ -69,6 +69,7 @@ Both suites are re-runnable and never touch a real profile or a real workspace f
 
 ## Limitations
 
+- **"Delete workspace" archives immediately; a missing folder waits a few seconds.** That is not an inconsistency: a missing folder is a single `stat` observation that can flicker (network drives, a rename in flight), so it waits out the confirmation window (3 seconds by default). "Delete workspace" is an authoritative registry change, and the plugin has seen that registration during this run, so it acts at once. Right after start-up, before the registry has finished populating, it does not take that fast path (then "not in the list" and "deleted" are indistinguishable) and falls back to the window.
 - **Archive and restore only know sessions they have recorded.** If the delete-and-re-add happens while the plugin is not running, it knows only the last snapshot in its ledger: members present in that snapshot are re-attached, older strays are not (the start-up adoption covers those whose `cwd` still equals the workspace path).
 - **Re-attaching is not unarchiving.** `attach` only touches the workspace member table; it never touches the archive set.
 - **Adoption runs once** (5 seconds after start-up): an orphan that appears later waits for the next restart.

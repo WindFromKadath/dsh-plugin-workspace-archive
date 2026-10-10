@@ -25,6 +25,8 @@ const tmpRoot = fileURLToPath(new URL('./.tmp/', import.meta.url))
 function fakeWorld(options = {}) {
   const state = {
     exists: true,
+    /** 登记是否还在：false 模拟菜单「删除工作区」（目录通常还在，登记没了）。 */
+    registered: true,
     path: '<repo>\\proj',
     title: 'proj',
     workspaceId: options.workspaceId ?? 'ws-1',
@@ -35,7 +37,7 @@ function fakeWorld(options = {}) {
   }
 
   const registry = {
-    list: () => [{
+    list: () => (state.registered ? [{
       id: state.workspaceId,
       path: state.path,
       title: state.title,
@@ -53,7 +55,7 @@ function fakeWorld(options = {}) {
         if (state.exists === false) throw new Error('cannot attach: the path is not a directory')
         if (state.members.includes(sessionId) === false) state.members.unshift(sessionId)
       }
-    }],
+    }] : []),
     /** 官方归档集合快照：引擎靠它区分「用户手动归档」与「本插件归档」。 */
     get archivedSessionIds() {
       return [...state.archived]
@@ -132,6 +134,26 @@ test('确认窗口（时间型）：第一轮只计时，窗口到点后的下�
   const onDisk = JSON.parse(await readFile(file, 'utf8'))
   assert.deepEqual(onDisk.workspaces['<repo>\\proj'].archivedSessionIds, ['s1', 's2'])
   assert.ok(typeof onDisk.workspaces['<repo>\\proj'].missingSince === 'string')
+})
+
+test('删除工作区登记：本进程见过的登记 → 同一轮对账内归档（不再等确认窗口）', async () => {
+  const world = fakeWorld()
+  // 真定时器：这条用例量的就是"从变更事件到归档"的墙钟时间。
+  const { engine } = await makeEngine(world, { confirmDelayMs: 3000 }, { timers: { setTimeout, clearTimeout } })
+  await engine.tick() // 健康一轮：本进程"见过"这条登记
+
+  world.state.registered = false // 菜单「删除工作区」
+  const t0 = Date.now()
+  await engine.notifyChange() // 事件驱动的那一轮（含 changeDelayMs 去抖）
+  const elapsed = Date.now() - t0
+
+  assert.deepEqual(
+    world.state.calls,
+    [['archive', 's1'], ['archive', 's2']],
+    '第一轮就该归档：否则官方删除登记后，那批会话会先在侧栏散成「无项目」停满 3 秒窗口'
+  )
+  assert.ok(elapsed < 1500, `应在同一轮内归档，实测 ${elapsed} ms`)
+  engine.dispose()
 })
 
 test('台账先落盘、后调官方归档（防 prune 的硬约束）', async () => {

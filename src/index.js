@@ -175,6 +175,15 @@ export function createEngine(deps) {
    * `list()` 可能是空的，若据此判定"项目被移除"会误归档，所以没见过非空就一律不动。
    */
   let registryWasPopulated = false
+  /**
+   * 本进程**亲眼见过**出现在 `registry.list()` 里的路径（归一化键）。
+   *
+   * 用来把两种"不在注册表里"区分开：
+   *  - 用户删掉了这条登记（本进程见过它 → 权威动作 → **立即归档**，不等确认窗口）；
+   *  - 刚启动、注册表还没 bootstrap 完（本进程从没见过它 → 必须走确认窗口，否则会误归档）。
+   * 见 `src/policy.js` 的确认模型说明。
+   */
+  const seenRegistered = new Set()
   /** parentDir → fs.FSWatcher。 */
   const watchers = new Map()
   let pendingTick = null
@@ -194,6 +203,8 @@ export function createEngine(deps) {
     const workspaces = registry.list()
     if (workspaces.length > 0) registryWasPopulated = true
     for (const workspace of workspaces) {
+      // 见过就算数：`status()` 只说明目录在不在，不说明登记还在不在。
+      seenRegistered.add(pathKey(workspace.path))
       const exists = (await workspace.status()) === 'ok'
       observations.push({
         path: workspace.path,
@@ -426,7 +437,9 @@ export function createEngine(deps) {
       now: nowImpl(),
       ledger,
       // 官方归档集合的当前快照：用来区分「用户手动归档」和「本插件归档」。
-      alreadyArchived: new Set(registry.archivedSessionIds ?? [])
+      alreadyArchived: new Set(registry.archivedSessionIds ?? []),
+      // 本进程见过这条登记 ⇒ 它的消失是权威事件，不等确认窗口（见 policy.js 的确认模型）。
+      wasRegistered: (path) => seenRegistered.has(pathKey(path))
     })
     probeState = state
     // 恢复/挂回都要用官方实体，所以先把这一轮看到的实体按路径索引好。
