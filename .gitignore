@@ -23,6 +23,7 @@ tests/.tmp/
 .verify/fixtures/
 # 离线迁移工具的一次性产物
 .verify/migrate-out/
+.verify/migrate-target/
 
 # 文件权限修复的记录与撤销脚本（本机一次性产物，2026-10-07）
 .verify/acl-recovery/
