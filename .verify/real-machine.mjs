@@ -398,7 +398,9 @@ try {
   const rowsAfterRename = await readRows()
   check(
     '改名后：注册表里**没有**新路径的记录（官方不会跟随改名）',
-    rowsAfterRename.every((row) => row.path.toLowerCase() !== renameNew.toLowerCase()),
+    // `every` 在空数组上恒真 ⇒ 必须同时要求"确实读到了记录"，否则这条会假通过。
+    rowsAfterRename.length > 0
+      && rowsAfterRename.every((row) => row.path.toLowerCase() !== renameNew.toLowerCase()),
     { paths: rowsAfterRename.map((row) => row.path) }
   )
   // 注册表 `workspaces` 是 `KvTable<WorkspaceId, WorkspaceRecord>`：id 是**映射的键**，不是记录的字段。
@@ -417,12 +419,12 @@ try {
     { sessionIds: entryAfterRename?.sessionIds }
   )
   check(
-    '⚠️ 改名后：台账 missingSince 仍是 null ⇒ 插件**根本没被叫醒**（watcher 拿到的 filename 是新名字，不在被跟踪的 basename 集合里，事件被过滤掉了）',
+    '⚠️ 改名后：台账 missingSince 仍是 null ⇒ 插件**没被叫醒**（这是直接证据）',
     entryAfterRename !== undefined && entryAfterRename.missingSince === null,
     { missingSince: entryAfterRename?.missingSince }
   )
   check(
-    '改名后：因此这条会话此刻**还没有**被归档（对照组：删目录会走同一条链路并在同一窗口内归档）',
+    '改名后：因此这条会话此刻**还没有**被归档（对照：阶段 3–5 已实测"删目录"会在同一窗口内归档）',
     new Set((await readJson(registryFile)).global.archivedSessionIds ?? []).has(renameSession) === false,
     { renameSession }
   )
@@ -437,7 +439,10 @@ try {
   }
   check(
     '改名后：会话日志仍在盘上，且位于**旧路径**对应的 project 目录下（不会自己跟着目录走）',
-    foundSlug !== null && foundSlug.toLowerCase().includes('renamed') === false,
+    // `projectKey` 没从包根导出，所以用目录名双向判定（含旧名、不含新名），比单向 includes 强。
+    foundSlug !== null
+      && foundSlug.toLowerCase().includes('proj-rename')
+      && foundSlug.toLowerCase().includes('proj-renamed') === false,
     { foundSlug }
   )
 
@@ -467,14 +472,18 @@ try {
     attachRefusal !== null,
     { error: String(attachRefusal) }
   )
-  const rowsAfterReadd = await readRows()
+  // ⚠️ 曾经写成 `readRows().find((row) => row.id === …)` —— 记录里**没有 `id` 字段**（id 是映射的键），
+  // 于是 find 恒返回 undefined、断言恒真（**假通过**）。这里必须走映射的键。
+  const rowMapAfterAttach = (await readJson(registryFile)).tables.workspaces
   check(
     '挂失败之后：新记录仍然是空的（校验先于写入，不产生半成品）',
-    (rowsAfterReadd.find((row) => row.id === readdAfterRename.id)?.sessionIds ?? []).length === 0
+    (rowMapAfterAttach[readdAfterRename.id]?.sessionIds ?? []).length === 0,
+    { newIds: rowMapAfterAttach[readdAfterRename.id]?.sessionIds }
   )
   check(
-    '此时该会话是归档态 ⇒ 用户看到的是「历史被藏起来、而且挂不回新工作区」',
-    new Set((await readJson(registryFile)).global.archivedSessionIds ?? []).has(renameSession) === true
+    '归档 ≠ 拆成员表：旧记录仍然列着这个会话（所以 C 之后还有机会把它重挂到新组）',
+    (rowMapAfterAttach[renameWs.id]?.sessionIds ?? []).includes(renameSession),
+    { oldIds: rowMapAfterAttach[renameWs.id]?.sessionIds }
   )
 
   console.log('\n── 真实注册表（测试 DSH_HOME）──')
