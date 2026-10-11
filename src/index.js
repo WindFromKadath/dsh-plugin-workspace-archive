@@ -25,14 +25,15 @@
  * @module dsh-plugin-workspace-archive
  */
 
-import { stat } from 'node:fs/promises'
-import { watch as fsWatch } from 'node:fs'
+import { readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { existsSync, watch as fsWatch } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 
 import { adoptUngrouped } from './adopt.js'
 import { LedgerStore, pathKey } from './ledger.js'
 import { planManual, resolveWorkspace } from './manual.js'
+import { parseMigrationIntent, planMigrationStep } from './migrate.js'
 import { createProbeState, evaluate } from './policy.js'
 
 /** Loader 行名。 */
@@ -71,6 +72,17 @@ export function resolveConfig(config) {
     adoptUngrouped: raw.adoptUngrouped ?? true,
     /** 归位动作在启动后延迟多久执行（毫秒）：避开官方 registry bootstrap 的自己那一轮。 */
     adoptDelayMs: raw.adoptDelayMs ?? 5000,
+    /**
+     * 是否处理离线迁移工具留下的**意图**（`offline/apply.js` 写的 `pending-migrations.json`）：
+     * 把迁移过来的会话用官方 `attachSession` 挂到新路径的工作区。可关。
+     * 归档态不用补偿 —— 官方归档集合是会话 id 的全局集合，与 cwd 无关。
+     */
+    applyMigrations: raw.applyMigrations ?? true,
+    /**
+     * 意图文件路径。**空 = 由 DSH 主目录推导**（`$DSH_HOME/workspace-archive/pending-migrations.json`）。
+     * 文件**存在**即触发；处理完会改名成 `consumed-migrations-<时间戳>.json` 留痕。
+     */
+    migrationIntentPath: raw.migrationIntentPath ?? '',
     ledgerFile: raw.ledgerFile ?? 'ledger.json',
     ledgerPath: raw.ledgerPath ?? '',
     dryRun: raw.dryRun ?? true
@@ -89,6 +101,12 @@ export function resolveConfig(config) {
   }
   if (!Number.isSafeInteger(resolved.adoptDelayMs) || resolved.adoptDelayMs < 0) {
     throw new TypeError('workspace-archive config adoptDelayMs must be a non-negative safe integer')
+  }
+  if (typeof resolved.applyMigrations !== 'boolean') {
+    throw new TypeError('workspace-archive config applyMigrations must be a boolean')
+  }
+  if (typeof resolved.migrationIntentPath !== 'string') {
+    throw new TypeError('workspace-archive config migrationIntentPath must be a string (empty = derive from DSH home)')
   }
   if (typeof resolved.ledgerFile !== 'string' || resolved.ledgerFile.length === 0) {
     throw new TypeError('workspace-archive config ledgerFile must be a non-empty string')
@@ -135,6 +153,17 @@ export function resolveDshHome(ctx) {
 export function resolveLedgerPath(config, ctx) {
   if (config.ledgerPath.length > 0) return config.ledgerPath
   return join(resolveDshHome(ctx), 'workspace-archive', config.ledgerFile)
+}
+
+/**
+ * 解析迁移意图文件的绝对路径。默认与台账同目录（`$DSH_HOME/workspace-archive/`）。
+ * @param config - 已归一化配置。
+ * @param ctx - Cordis 上下文（可为 undefined）。
+ * @returns 绝对路径。
+ */
+export function resolveMigrationIntentPath(config, ctx) {
+  if (config.migrationIntentPath.length > 0) return config.migrationIntentPath
+  return join(resolveDshHome(ctx), 'workspace-archive', 'pending-migrations.json')
 }
 
 /**
@@ -196,6 +225,8 @@ export function createEngine(deps) {
    */
   const watched = new Map()
   let probeTimer = null
+  /** 「迁移意图还在等目标工作区登记」这类日志只打一次，免得每个 tick 刷屏。 */
+  let migrationPendingLogged = false
   let pendingTick = null
   let confirmTimer = null
   let disposed = false
@@ -582,7 +613,141 @@ export function createEngine(deps) {
   }
 
   /** 跑一轮对账。 */
+  /**
+   * 消费离线迁移工具留下的**意图**（F022 的在线层）。
+   *
+   * 离线层负责改不了官方 API 的那半（改写 header 的 cwd、搬日志目录）；这一层只做官方 API 能做的：
+   * 把会话 `attachSession` 到新路径的工作区，并尽力从旧工作区 `detachSession`。
+   *
+   * **归档态不用补偿**：官方归档集合是**会话 id 的全局集合**，与 cwd、与工作区都无关
+   * ⇒ 原本归档的会话在新组里**仍然归档**。
+   *
+   * 幂等、可重入：文件**存在**即触发（每个 tick 看一眼 `existsSync`，很便宜）；处理完写一份
+   * `consumed-migrations-<时间戳>.json` 留痕再删掉待处理文件。坏文件改名成 `invalid-…` 留痕，
+   * 免得每轮重试。目标工作区还没登记时**保持待处理**（用户可能马上就把那个目录加进来）。
+   * @returns 结果对象，或 `null`（没开 / 没有意图）。
+   */
+  async function runMigrations() {
+    // 默认**开**：`resolveConfig` 会给默认值，但引擎也可能被直接喂原始 config（测试就是这么用的），
+    // 所以这里只认显式的 `false` 才关闭 —— 免得"少了一个字段"静默变成"功能没跑"。
+    if (config.applyMigrations === false) return null
+    const path = config.migrationIntentPath
+    if (typeof path !== 'string' || path.length === 0) return null
+    if (existsSync(path) === false) return null
+
+    const stamp = () => new Date().toISOString().replace(/[:.]/g, '-')
+    let parsed
+    try {
+      parsed = parseMigrationIntent(await readFile(path, 'utf8'))
+    } catch (error) {
+      parsed = { ok: false, reason: `intent-unreadable: ${String(error)}` }
+    }
+    if (parsed.ok !== true) {
+      try {
+        await rename(path, join(dirname(path), `invalid-migrations-${stamp()}.json`))
+      } catch { /* 移不动就留着，下一轮再说 */ }
+      logger?.warn?.(`workspace-archive: 迁移意图不可用，已移到一边：${parsed.reason}`)
+      return { ok: false, reason: parsed.reason }
+    }
+
+    const intent = parsed.intent
+    const entities = registry.list()
+    const projection = entities.map((workspace) => ({
+      id: workspace.id,
+      path: workspace.path,
+      sessionIds: [...workspace.sessionIds]
+    }))
+    const step = planMigrationStep(intent, projection)
+    if (step.ok !== true) {
+      if (migrationPendingLogged === false) {
+        migrationPendingLogged = true
+        logger?.warn?.(`workspace-archive: 迁移意图还在等目标工作区登记：${step.reason}`)
+      }
+      return { ok: false, reason: step.reason }
+    }
+    migrationPendingLogged = false
+
+    if (config.dryRun === true) {
+      logger?.info?.(
+        `workspace-archive[dryRun]: 迁移意图待处理 ${intent.sessions.length} 条`
+        + `（挂回 ${step.attach.length} / 摘掉 ${step.detach.length}）`
+      )
+      return { ok: true, dryRun: true, attach: step.attach.length, detach: step.detach.length }
+    }
+
+    const attached = []
+    const detached = []
+    // 失败也要进审计记录 —— 只写日志的话，装置/用户都看不到到底哪条没挂上、为什么。
+    const failures = []
+    const target = entities.find((workspace) => workspace.id === step.target.id)
+    for (const sessionId of step.attach) {
+      try {
+        await target.attachSession(sessionId)
+        attached.push(sessionId)
+      } catch (error) {
+        failures.push({ sessionId, phase: 'attach', error: String(error) })
+        logger?.warn?.(`workspace-archive: 迁移后挂回 ${sessionId} 失败：${String(error)}`)
+      }
+    }
+    const source = step.source === null ? undefined : entities.find((workspace) => workspace.id === step.source.id)
+    for (const sessionId of step.detach) {
+      try {
+        await source.detachSession(sessionId)
+        detached.push(sessionId)
+      } catch (error) {
+        failures.push({ sessionId, phase: 'detach', error: String(error) })
+        logger?.warn?.(`workspace-archive: 从旧工作区摘掉 ${sessionId} 失败：${String(error)}`)
+      }
+    }
+
+    const record = {
+      consumedAt: new Date().toISOString(),
+      intent,
+      attached,
+      detached,
+      failures,
+      targetPath: step.target.path,
+      sourcePath: step.source === null ? null : step.source.path
+    }
+
+    // ⚠️ **有失败就不要消费意图。** 最常见的原因是：离线改写是在**本进程还活着的时候**做的 ——
+    // 官方 registry 有 header 内存缓存（`dsh-workspace/lib/index.js:911-923` 的 `this.headers`），
+    // 它会一直吐出**旧的** cwd，于是 `attachSession` 报 "its cwd resolves to <旧路径>"。
+    // 那种情况下唯一的解法是**重启 DSH**；把意图留着，下次启动就会成功。
+    if (failures.length > 0) {
+      try {
+        await writeFile(
+          join(dirname(path), `migration-failures-${stamp()}.json`),
+          JSON.stringify(record, null, 2),
+          'utf8'
+        )
+      } catch { /* 留痕失败不影响主流程 */ }
+      if (migrationPendingLogged === false) {
+        migrationPendingLogged = true
+        logger?.warn?.(
+          `workspace-archive: 迁移意图处理有 ${failures.length} 条失败，**保持待处理**`
+          + '（多半是离线改写与本次启动之间有重叠 —— 重启 DSH 后会成功）'
+        )
+      }
+      return { ok: false, reason: 'attach-failed', failures, attach: attached.length, detach: detached.length }
+    }
+
+    try {
+      await writeFile(join(dirname(path), `consumed-migrations-${stamp()}.json`), JSON.stringify(record, null, 2), 'utf8')
+      await rm(path, { force: true })
+    } catch (error) {
+      logger?.warn?.(`workspace-archive: 迁移意图留痕失败（意图会再跑一次，幂等）：${String(error)}`)
+    }
+    logger?.info?.(
+      `workspace-archive: 迁移意图已处理（挂回 ${attached.length} / 摘掉 ${detached.length}）`
+      + ` → ${step.target.path}`
+    )
+    return { ok: true, attach: attached.length, detach: detached.length }
+  }
+
   async function tick() {
+    // 先把离线迁移的意图消化掉，再对账 —— 这样这一轮的观察就已经是"迁移之后"的状态。
+    await runMigrations()
     const observations = await observe()
     const { actions, state } = evaluate({
       observations,
@@ -617,7 +782,7 @@ export function createEngine(deps) {
     return actions
   }
 
-  return { tick, notifyChange, manualWorkspace, dispose }
+  return { tick, notifyChange, manualWorkspace, runMigrations, dispose }
 }
 
 /**
@@ -819,6 +984,8 @@ export function apply(ctx, config) {
   const logger = ctx?.logger
 
   const ledger = new LedgerStore(resolveLedgerPath(resolved, ctx))
+  // 意图路径要在建引擎**之前**解析成绝对路径 —— 引擎不该知道 DSH 主目录是怎么来的。
+  resolved.migrationIntentPath = resolveMigrationIntentPath(resolved, ctx)
   const engine = createEngine({ registry, ledger, config: resolved, logger: ctx?.logger })
 
   const run = () => {

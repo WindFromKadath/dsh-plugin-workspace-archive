@@ -17,6 +17,9 @@ import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+import { applyPlan } from '../offline/apply.js'
+import { buildPlan } from '../offline/plan.js'
+
 const root = fileURLToPath(new URL('../', import.meta.url))
 const home = join(root, '.verify', 'home')
 const configPath = join(root, '.verify', 'rm', 'cordis.yml')
@@ -90,10 +93,11 @@ console.log(`场景目录 = ${projectDir}`)
 console.log(`用户真实注册表归档数（测试前）= ${userArchivedBefore}`)
 
 const { boot } = await import('@deepseek-ai/dsh-app-boot')
-const ctx = await boot('dsh-rm-test', configPath, [], undefined, pathToFileURL(join(root, 'package.json')).href)
+const bootArgs = ['dsh-rm-test', configPath, [], undefined, pathToFileURL(join(root, 'package.json')).href]
+let ctx = await boot(...bootArgs)
 
-const registry = ctx.get('workspaceRegistry')
-const persistence = ctx.get('sessionPersistence')
+let registry = ctx.get('workspaceRegistry')
+let persistence = ctx.get('sessionPersistence')
 check('真机装载：workspaceRegistry 服务存在', registry !== undefined)
 check('真机装载：sessionPersistence 服务存在', persistence !== undefined)
 
@@ -486,6 +490,90 @@ try {
     (rowMapAfterAttach[renameWs.id]?.sessionIds ?? []).includes(renameSession),
     { oldIds: rowMapAfterAttach[renameWs.id]?.sessionIds }
   )
+
+  // ── 阶段 9：离线迁移 + 在线挂回（F022 / B 全链路）──────────────
+  // ① 离线层：改 header 的 cwd、把日志搬到新 projectKey、写下意图（**不碰官方 storages/**）
+  // ② 在线层：插件读到意图后**只用官方 attachSession / detachSession** 把会话挪到 B
+  // ③ 归档态原样保持（官方归档集合是会话 id 的全局集合，与 cwd 无关）
+  const migrateOld = join(root, '.verify', 'proj-migrate-old')
+  const migrateNew = join(root, '.verify', 'proj-migrate-new')
+  const migrateTrigger = join(root, '.verify', 'proj-migrate-trigger')
+  for (const dir of [migrateOld, migrateNew, migrateTrigger]) {
+    await rm(dir, { recursive: true, force: true })
+    await mkdir(dir, { recursive: true })
+  }
+
+  const migrateWsOld = await registry.create(migrateOld)
+  const migrateWsNew = await registry.create(migrateNew)
+  const migrateA = `session-${randomUUID()}`
+  const migrateB = `session-${randomUUID()}`
+  for (const id of [migrateA, migrateB]) {
+    const handle = await persistence.create({
+      version: 4, id, createdAt: Date.now(), cwd: migrateWsOld.path, isSeeded: false, delegationDepth: 0
+    })
+    await handle.flush()
+    await handle.close()
+    await migrateWsOld.attachSession(id)
+  }
+  // B 模拟「用户自己手动归档」，迁移之后必须仍然归档
+  await registry.archiveSession(migrateB)
+
+  const migrateSessionsRoot = join(home, 'sessions')
+  const migratePlan = await buildPlan({
+    sessionsRoot: migrateSessionsRoot,
+    fromCwd: migrateWsOld.path,
+    toCwd: migrateWsNew.path
+  })
+  check('阶段 9：离线计划可用（两条会话都在）', migratePlan.ok === true && migratePlan.summary.total === 2, {
+    blockers: migratePlan.blockers
+  })
+
+  const migrateIntent = join(home, 'workspace-archive', 'pending-migrations.json')
+  const migrateApplied = await applyPlan(migratePlan, {
+    backupRoot: join(root, '.verify', 'migrate-out'),
+    confirmed: true,
+    intentPath: migrateIntent
+  })
+  check('阶段 9：离线迁移完成并写下迁移意图', migrateApplied.ok === true && migrateApplied.intentPath === migrateIntent, {
+    migrated: migrateApplied.migrated ?? 0
+  })
+
+  // ⚠️ 关键：离线改写只对**重新读 header 的进程**生效 —— 官方 registry 有 header 内存缓存
+  // （`dsh-workspace/lib/index.js:911-923` 的 `this.headers`），活着的进程会一直吐旧 cwd，
+  // 于是 `attachSession` 会报 "its cwd resolves to <旧路径>"。所以这里**必须重启运行时**，
+  // 这也正是工具的硬前提"必须先关掉 DSH"的由来。
+  await ctx.fiber.dispose()
+  ctx = await boot(...bootArgs)
+  registry = ctx.get('workspaceRegistry')
+  persistence = ctx.get('sessionPersistence')
+
+  // 叫醒插件（任意一次注册表写都会发 domain/changed；阶段 8 已实测这条链路有效）
+  await registry.create(migrateTrigger)
+  await sleep(POLL_WAIT_MS * 2)
+
+  const migrateRows = (await readJson(registryFile)).tables.workspaces
+  const newIds = migrateRows[migrateWsNew.id]?.sessionIds ?? []
+  check('阶段 9：会话已被官方 attachSession 挂到**新**工作区', [migrateA, migrateB].every((id) => newIds.includes(id)), {
+    newIds
+  })
+
+  // ⚠️ 必须读**投影**（`Workspace.sessionIds` 是按 session-path 索引过滤的），不能读注册表原始记录的
+  // `sessionIds` —— 原始记录里的陈旧 id 要等对该记录的一次写操作才被 prune（官方 `mutate` 的行为）。
+  const migrateOldLive = registry.get(migrateWsOld.id)
+  check('阶段 9：旧工作区的**成员投影**里已经没有它们', [migrateA, migrateB].every(
+    (id) => migrateOldLive.sessionIds.includes(id) === false
+  ), { oldIds: migrateOldLive.sessionIds })
+
+  const archivedAfterMigrate = new Set((await readJson(registryFile)).global.archivedSessionIds ?? [])
+  check('阶段 9：原本归档的 B 在新组里**仍然归档**（归档态不用补偿）', archivedAfterMigrate.has(migrateB) === true, {
+    migrateB
+  })
+  check('阶段 9：原本没归档的 A 也没被顺手归档', archivedAfterMigrate.has(migrateA) === false, { migrateA })
+
+  check('阶段 9：意图被消费掉（待处理文件没了）', (await exists(migrateIntent)) === false)
+  const archiveSidecarDir = join(home, 'workspace-archive')
+  const consumedFiles = (await readdir(archiveSidecarDir)).filter((name) => name.startsWith('consumed-migrations-'))
+  check('阶段 9：留下消费记录（可审计）', consumedFiles.length === 1, { consumedFiles })
 
   console.log('\n── 真实注册表（测试 DSH_HOME）──')
   console.log(JSON.stringify({ archivedSessionIds: [...archivedAfterReadd] }, null, 2))

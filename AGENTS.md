@@ -62,6 +62,16 @@
   - **写入层的安全顺序**（`offline/apply.js`）：备份（**任何改动之前**）→ 改写第 0 帧 → 写新（**临时文件 + 原子 `rename`**）→ 自检（目标 header 的 cwd 正确 / **第 0 帧之后的字节与源逐字节相同** / 事件行逐字相同）→ **最后才删源目录**。⇒ 任何一步失败**源都还在**。刻意**不**用"先删后写"，也**不**用跨目录 `rename`（跨盘会失败，且失败时源已不在原位）。
   - **两道写入闸门**：① 显式 `--i-have-stopped-dsh`；② `--backup <dir>` **必填、无默认值**（避免悄悄写到意料之外的地方）。**刻意不做可靠存活探测**：`probeDshRunning()` 用 `tasklist` 且任何失败都返回 `'unknown'` —— 生态先例 `dsh-mv-session` 的 `detectLiveDsh()` 就是**静默失效**的；与其假装检查，不如要求人显式声明。实测在本机沙箱里它返回 `unknown`（沙箱禁止 Node 捕获子进程输出）。
   - 证据：单元 **133/133**（新增 `tests/offline-apply.test.mjs` 8 条：闸门、全流程、回滚、回滚冲突、失败路径下源仍在、verify 反例）。**真实数据演练**（一次性副本，**不碰真实 `sessions/`**）：8 条真会话 plan → apply → 逐条复核「第 0 帧之后字节 8/8 相同、事件行 8/8 相同、header 的 cwd 已换」→ rollback → **8/8 文件哈希与基线完全一致**、源 project 恢复、目标 project 清空。
+- **⚠️ 「必须先关掉 DSH」是正确性前提，不只是安全建议**（2026-10-11 实测，**非查不可**）：官方 registry 有 **header 内存缓存** —— `readSessionHeader(id)` 先查 `ctx.get("sessions")`、再查 `this.headers`（bootstrap 时由 `listStoredHeaders()` 灌满），命中了就直接返回（`dsh-workspace/lib/index.js:911-923`）。
+  - ⇒ **在活着的进程里做离线改写，官方会一直吐旧 cwd**：`attachSession` 报 *"its cwd resolves to &lt;旧路径&gt;"*。实测真机阶段 9 一开始就是这样 58/59 —— 不是代码 bug，是**测试场景违反了工具自己的前提**。修法是**重启运行时**（阶段 9 现在会 `dispose()` + 重新 `boot()`），这也是工具闸门要求 `--i-have-stopped-dsh` 的真正原因。
+  - **插件的自愈设计**：迁移**有失败就不消费意图**（保持待处理 + 写 `migration-failures-<时间戳>.json` 留痕 + 只警告一次）；下次 DSH 启动时会重试并成功。
+  - **成员资格要看投影，不是原始记录**：`Workspace.sessionIds` 是 `record.sessionIds.filter(id => host.sessionPath(id) === record.path)`（同文件 `:102-104`）。离线迁移 + 重启后，session-path 索引按新 cwd 重建 ⇒ **旧工作区的投影自动就不含这些会话了**（我们的 `detach` 因此什么都无需做）；而注册表**原始记录**里的陈旧 id 要等对该记录的一次写操作才被 prune。**断言/排查时读投影**，读原始 JSON 会得出错误结论（阶段 9 第一版就踩了）。
+- **在线层已实现**（F022，2026-10-11，`src/migrate.js` + `src/index.js` 的 `runMigrations()`）：离线层写**意图**（`$DSH_HOME/workspace-archive/pending-migrations.json`），插件**每个 tick 开头**看它存在与否（`existsSync`，很便宜）→ 用**官方** `attachSession` / `detachSession` 把会话挂到新路径的工作区、从旧工作区摘掉。
+  - **归档态不用补偿**：官方归档集合是**会话 id 的全局集合**，与 cwd、与工作区都无关 ⇒ 原本归档的会话在新组里**仍然归档**（测试与真机都断言了这一点）。
+  - 意图里按 `createdAt` **升序**排：官方 `attachSession` 是**前插**，升序挂完，新组里的顺序正好是官方惯例的"新的在前"。
+  - 幂等、可重入：处理完写 `consumed-migrations-<时间戳>.json` 留痕再删待处理文件；坏意图改名成 `invalid-migrations-<…>.json`（免得每轮重试）；目标工作区还没登记时**保持待处理**（用户可能马上就会把那个目录加进来），日志只打一次。
+  - 配置：`applyMigrations`（默认 **true**）、`migrationIntentPath`（空 = 由 DSH 主目录推导）。
+  - 证据：单元 **148/148**（`tests/migrate.test.mjs` 13 条：解析 fail-closed、决策（含"源组已不在列表里"与 noop）、引擎真调 API、**归档态不受影响**、幂等、目标未登记则保持待处理并在登记后处理、dryRun 不消费、坏意图移走）；真机 **59/59**（新增**阶段 9**：离线 plan → apply → **重启运行时** → 插件消费意图 → 断言挂到新组、旧组投影清空、**原本归档的仍归档**、意图被消费且留痕）。
 - **「注册表成员数 ≠ 侧栏可见行数」—— 别再重查**（2026-10-11 实测）：一个工作区可以攒下很多**空白会话**（点过「+」/ 新建过会话但**从没发过话**），侧栏按官方规则**不画**它们。`dsh-api-session-controller` 里 `SessionListMetadata.blank` 的定义是 *"Whether the folded prefix contains **no turn**"*；客户端契约明写 *"**lists hide blank sessions**"* 与 *"browser shows **only the selected blank entry**"*（`client/sessions/lineage.d.ts:16-20`、`service.d.ts:33-35`）。
   - 实例（用户 2026-10-11 报"`已归档 8/8`，可侧栏只有 4 行"）：`Rust` 工作区注册表 **8** 个成员 = 4 条真对话（21-22 事件 / 15.7–16.1 KB / 末尾 `session/end-seed` / 有首条用户消息）+ **4 条空白会话**（**恰好 4 事件 / 319-326 字节 / 末尾 `approval/policy` / 无用户消息**）⇒ 侧栏正好 4 行，且 4 个标题逐字对上。
   - 后果：本插件报的 `已归档 N/N` 里 N 是**成员数**，会比侧栏行数大。**行为正确、零损失**（空白会话本就不可见）。

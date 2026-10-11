@@ -102,6 +102,8 @@ test('resolveConfig 拒绝越界值，并接受合法覆盖', () => {
   assert.throws(() => resolveConfig({ watch: 'yes' }), /watch/)
   assert.throws(() => resolveConfig({ adoptUngrouped: 'yes' }), /adoptUngrouped/)
   assert.throws(() => resolveConfig({ adoptDelayMs: -1 }), /adoptDelayMs/)
+  assert.throws(() => resolveConfig({ applyMigrations: 'yes' }), /applyMigrations/)
+  assert.throws(() => resolveConfig({ migrationIntentPath: 5 }), /migrationIntentPath/)
   assert.throws(() => resolveConfig({ ledgerFile: '' }), /ledgerFile/)
   assert.throws(() => resolveConfig({ dryRun: 'yes' }), /dryRun/)
   assert.deepEqual(resolveConfig({
@@ -110,6 +112,8 @@ test('resolveConfig 拒绝越界值，并接受合法覆盖', () => {
     watch: false,
     adoptUngrouped: false,
     adoptDelayMs: 0,
+    applyMigrations: false,
+    migrationIntentPath: '',
     dryRun: false
   }), {
     pollIntervalMs: 60000,
@@ -117,6 +121,8 @@ test('resolveConfig 拒绝越界值，并接受合法覆盖', () => {
     watch: false,
     adoptUngrouped: false,
     adoptDelayMs: 0,
+    applyMigrations: false,
+    migrationIntentPath: '',
     ledgerFile: 'ledger.json',
     ledgerPath: '',
     dryRun: false

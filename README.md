@@ -78,14 +78,17 @@ DSH 有意把"目录缺失"和"归档"分开：
 # ① 只读预演：扫描 + 预检 + 打印计划，不写任何文件
 node bin/dsh-session-migrate.mjs plan --from <源 cwd> --to <目标 cwd>
 
-# ② 执行：先备份 → 只改第 0 帧 → 搬到新 projectKey → 逐条自检 → 最后才删源
+# ② 执行：先备份 → 只改第 0 帧 → 搬到新 projectKey → 逐条自检 → 最后才删源，并写下迁移意图
 node bin/dsh-session-migrate.mjs apply --from <源 cwd> --to <目标 cwd> --backup <备份目录> --i-have-stopped-dsh
 
-# ③ 回滚：源目录放回、目标目录删除
+# ③ 重启 DSH：插件读到意图后，用**官方** attachSession 把会话挂到新工作区的分组里
+# ④ 回滚：源目录放回、目标目录删除（迁移意图也会被清掉）
 node bin/dsh-session-migrate.mjs rollback --backup <备份目录>
 ```
 
 退出码：`0` 成功 / `2` 被拒绝或被阻塞 / `1` 用法或内部错误。
+
+**⚠️ 必须先完全退出 DSH —— 这是正确性前提，不只是安全建议。** 官方 registry 有 **header 内存缓存**（`dsh-workspace/lib/index.js:911-923`）：活着的进程会一直读到**旧的** cwd，于是 `attachSession` 报 *"its cwd resolves to &lt;旧路径&gt;"*。所以流程必须是「关机 → apply → 开机」。
 
 **写入闸门**（两道，缺一不可）：显式声明 `--i-have-stopped-dsh`，以及必填的 `--backup`（**没有默认值**，避免悄悄写到意料之外的地方）。工具**不替你判断 DSH 是否还在跑** —— Windows 上没有可靠的检测方式，生态先例的探测就是静默失效的，与其假装检查，不如要求你显式声明。
 

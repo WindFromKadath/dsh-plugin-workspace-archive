@@ -150,6 +150,34 @@ test('verifyMigration：目标被动过就必须报出来', async () => {
   assert.deepEqual(verifyMigration(src, src, FROM), { ok: true })
 })
 
+test('迁移意图：apply 写下、rollback 清掉', async () => {
+  const { plan, backups } = await setup()
+  const intentPath = join(await tempDir('apply-intent-'), 'pending-migrations.json')
+
+  const applied = await applyPlan(plan, { backupRoot: backups, confirmed: true, intentPath })
+  assert.equal(applied.ok, true)
+  const intent = JSON.parse(await readFile(intentPath, 'utf8'))
+  assert.equal(intent.version, 1)
+  assert.equal(intent.toCwd, plan.toCwd)
+  assert.equal(intent.fromCwd, FROM)
+  assert.deepEqual([...intent.sessions].sort(), plan.sessions.map((item) => item.sessionId).sort())
+  // 顺序刻意按 createdAt 升序：官方 attachSession 是前插 ⇒ 挂完正好"新的在前"
+  const times = plan.sessions.map((item) => item.createdAt ?? 0)
+  assert.deepEqual(times, [...times].sort((a, b) => a - b))
+
+  const reverted = await rollback(applied.backupDir)
+  assert.equal(reverted.ok, true)
+  assert.equal(reverted.clearedIntent, intentPath)
+  assert.equal(await fileExists(intentPath), false, '回滚后意图必须清掉，否则插件会把它们挂到目标组')
+})
+
+test('迁移意图：没给 intentPath 就不写（可选）', async () => {
+  const { plan, backups } = await setup()
+  const result = await applyPlan(plan, { backupRoot: backups, confirmed: true })
+  assert.equal(result.ok, true)
+  assert.equal(result.intentPath, null)
+})
+
 test('迁移后源 project 目录下不再有会话（只剩空目录）', async () => {
   const { plan, sessionsRoot } = await setup()
   await applyPlan(plan, { backupRoot: await tempDir('apply-bak-'), confirmed: true })

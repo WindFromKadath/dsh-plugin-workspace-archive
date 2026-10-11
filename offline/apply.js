@@ -90,9 +90,30 @@ export function verifyMigration(srcBuffer, dstBuffer, expectedCwd) {
 }
 
 /**
+ * 写一份**迁移意图**给在线层（插件启动后/下一轮对账时）消费。
+ *
+ * 离线层能做的是"改 cwd + 搬目录"；把会话挂到新工作区的成员表里只能由插件走官方
+ * `attachSession` 做。归档态**不用写进意图** —— 官方归档集合是会话 id 的全局集合，
+ * 与 cwd 无关，`attachSession` 也不看它。
+ * @param intentPath - 意图文件路径。
+ * @param payload - `{ fromCwd, toCwd, backupDir, sessionIds }`。
+ */
+export async function writeMigrationIntent(intentPath, payload) {
+  await mkdir(dirname(intentPath), { recursive: true })
+  await writeFile(intentPath, JSON.stringify({
+    version: 1,
+    createdAt: new Date().toISOString(),
+    fromCwd: payload.fromCwd,
+    toCwd: payload.toCwd,
+    backupDir: payload.backupDir ?? null,
+    sessions: [...payload.sessionIds]
+  }, null, 2), 'utf8')
+}
+
+/**
  * 执行一份计划。**会真正改动文件。**
  * @param plan - `buildPlan()` 的返回值，必须 `ok === true`。
- * @param options - `{ backupRoot, confirmed }`；`confirmed` 必须是字面量 `true`（显式闸门）。
+ * @param options - `{ backupRoot, confirmed, intentPath }`；`confirmed` 必须是字面量 `true`（显式闸门）。
  * @returns 结果对象。
  */
 export async function applyPlan(plan, options) {
@@ -102,6 +123,9 @@ export async function applyPlan(plan, options) {
   if (typeof backupRoot !== 'string' || backupRoot.length === 0) {
     return { ok: false, reason: 'backup-root-required' }
   }
+  const intentPath = typeof options?.intentPath === 'string' && options.intentPath.length > 0
+    ? options.intentPath
+    : null
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
   const backupDir = join(backupRoot, stamp)
@@ -113,6 +137,7 @@ export async function applyPlan(plan, options) {
     createdAt: new Date().toISOString(),
     fromCwd: plan.fromCwd,
     toCwd: plan.toCwd,
+    intentPath,
     sessions: []
   }
   for (const session of plan.sessions) {
@@ -152,7 +177,30 @@ export async function applyPlan(plan, options) {
     migrated.push(session.sessionId)
   }
 
-  return { ok: true, backupDir, migrated: migrated.length, sessionIds: migrated }
+  // ⑤ 写意图给在线层。**哪怕是部分成功也要写** —— 已经搬过去的那些确实需要被挂回新工作区。
+  //
+  // 顺序刻意按 `createdAt` **升序**：在线层是逐个 `attachSession`，而官方 `attachSession` 是
+  // **前插** ⇒ 升序挂完，新组里的顺序正好是官方惯例的"新的在前"。
+  let intentWritten = null
+  if (intentPath !== null && migrated.length > 0) {
+    const ordered = plan.sessions
+      .filter((session) => migrated.includes(session.sessionId))
+      .sort((left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0))
+      .map((session) => session.sessionId)
+    try {
+      await writeMigrationIntent(intentPath, {
+        fromCwd: plan.fromCwd,
+        toCwd: plan.toCwd,
+        backupDir,
+        sessionIds: ordered
+      })
+      intentWritten = intentPath
+    } catch (error) {
+      return { ok: false, reason: `intent-write-failed: ${String(error)}`, backupDir, migrated }
+    }
+  }
+
+  return { ok: true, backupDir, migrated: migrated.length, sessionIds: migrated, intentPath: intentWritten }
 }
 
 /**
@@ -178,5 +226,15 @@ export async function rollback(backupDir) {
     await rm(session.dstDir, { recursive: true, force: true })
     restored.push(session.sessionId)
   }
-  return { ok: true, restored: restored.length, sessionIds: restored }
+
+  // 会话已经放回原位了 ⇒ 那份还没被在线层消费的意图必须清掉，否则插件会把它们挂到目标组去。
+  let clearedIntent = null
+  if (typeof manifest.intentPath === 'string' && manifest.intentPath.length > 0) {
+    try {
+      await rm(manifest.intentPath, { force: true })
+      clearedIntent = manifest.intentPath
+    } catch { /* 删不掉就让插件去处理，反正它只在文件存在时才动 */ }
+  }
+
+  return { ok: true, restored: restored.length, sessionIds: restored, clearedIntent }
 }

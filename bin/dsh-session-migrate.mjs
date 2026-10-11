@@ -40,12 +40,16 @@ const USAGE = `用法：
 apply 额外要求：
   --backup <dir>            备份根目录（**必填**，不设默认值，避免悄悄写到意料之外的地方）
   --i-have-stopped-dsh      显式声明 DSH 已完全退出（**必填**）
+  --intent <path>           迁移意图文件路径（默认 $DSH_HOME/workspace-archive/pending-migrations.json）
+
+apply 成功后会在意图文件里记下"这些会话现在属于新路径了"。**重启 DSH 后**，插件读到它就会用官方
+attachSession 把它们挂到新工作区的分组里（依然只走官方 API，不直写 storages/）。
 
 退出码：0 成功 / 2 被拒绝或被阻塞 / 1 用法或内部错误`
 
 function parseArgs(argv) {
   const options = {
-    sessions: null, from: null, to: null, backup: null,
+    sessions: null, from: null, to: null, backup: null, intent: null,
     only: [], json: false, help: false, stopped: false
   }
   for (let index = 0; index < argv.length; index++) {
@@ -57,6 +61,7 @@ function parseArgs(argv) {
     else if (arg === '--to') options.to = argv[++index]
     else if (arg === '--sessions') options.sessions = argv[++index]
     else if (arg === '--backup') options.backup = argv[++index]
+    else if (arg === '--intent') options.intent = argv[++index]
     else if (arg === '--session') options.only.push(argv[++index])
     else throw new Error(`无法识别的参数：${arg}`)
   }
@@ -66,6 +71,13 @@ function parseArgs(argv) {
 function defaultSessionsRoot() {
   const home = process.env.DSH_HOME
   return home !== undefined && home.length > 0 ? join(home, 'sessions') : join(homedir(), '.dsh', 'sessions')
+}
+
+/** 意图文件的默认位置：与插件的 sidecar 同目录。 */
+function defaultIntentPath() {
+  const home = process.env.DSH_HOME
+  const root = home !== undefined && home.length > 0 ? home : join(homedir(), '.dsh')
+  return join(root, 'workspace-archive', 'pending-migrations.json')
 }
 
 function planOf(options) {
@@ -156,7 +168,8 @@ async function main(argv) {
 
   const result = await applyPlan(plan, {
     backupRoot: resolve(options.backup),
-    confirmed: true
+    confirmed: true,
+    intentPath: resolve(options.intent ?? defaultIntentPath())
   })
   report(
     options,
@@ -165,6 +178,9 @@ async function main(argv) {
       ? [
         `已迁移 ${result.migrated} 条会话：${plan.fromCwd} → ${plan.toCwd}`,
         `备份：${result.backupDir}`,
+        result.intentPath === null
+          ? '（没写迁移意图：一条都没搬成）'
+          : `迁移意图：${result.intentPath}\n  重启 DSH 后，插件会把它们挂到新工作区的分组里（只走官方 attachSession）。`,
         '回滚：node bin/dsh-session-migrate.mjs rollback --backup ' + result.backupDir
       ].join('\n')
       : `迁移未完成：${result.reason}${result.detail === undefined ? '' : `（${result.detail}）`}`
