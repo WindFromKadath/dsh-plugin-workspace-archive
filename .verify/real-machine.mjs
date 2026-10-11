@@ -12,12 +12,13 @@
  * 用法：npm run rm-test   （= node --import ./test/register.mjs .verify/real-machine.mjs）
  */
 
-import { mkdir, readdir, readFile, rename, rm, stat, symlink } from 'node:fs/promises'
+import { mkdir, open, readdir, readFile, rename, rm, stat, symlink } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { applyPlan } from '../offline/apply.js'
+import { projectKey } from '../offline/frames.js'
 import { buildPlan } from '../offline/plan.js'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
@@ -574,6 +575,118 @@ try {
   const archiveSidecarDir = join(home, 'workspace-archive')
   const consumedFiles = (await readdir(archiveSidecarDir)).filter((name) => name.startsWith('consumed-migrations-'))
   check('阶段 9：留下消费记录（可审计）', consumedFiles.length === 1, { consumedFiles })
+
+  // ── 阶段 10：**运行中**做离线迁移，到底安不安全？（实测，不推断）──
+  // 问题：能不能不关 DSH 就迁？分两种情形量：
+  //   情形 1：那条会话**没被打开**（句柄已 close）
+  //   情形 2：那条会话**正被打开**（句柄不 close = 正在对话）—— 还有写入方指着旧路径
+  const liveOld = join(root, '.verify', 'proj-live-old')
+  const liveNew = join(root, '.verify', 'proj-live-new')
+  for (const dir of [liveOld, liveNew]) {
+    await rm(dir, { recursive: true, force: true })
+    await mkdir(dir, { recursive: true })
+  }
+  const liveWsOld = await registry.create(liveOld)
+  const liveWsNew = await registry.create(liveNew)
+  const liveSessionsRoot = join(home, 'sessions')
+  const liveIntent = join(home, 'workspace-archive', 'pending-migrations.json')
+  const liveBackup = join(root, '.verify', 'migrate-out')
+  const projectKeyOf = (cwd) => projectKey(cwd)
+  const liveOldDir = join(liveSessionsRoot, projectKeyOf(liveWsOld.path))
+  const liveNewDir = join(liveSessionsRoot, projectKeyOf(liveWsNew.path))
+
+  const mkSession = async (id) => {
+    const handle = await persistence.create({
+      version: 4, id, createdAt: Date.now(), cwd: liveWsOld.path, isSeeded: false, delegationDepth: 0
+    })
+    await handle.flush()
+    await liveWsOld.attachSession(id)
+    return handle
+  }
+  const migrateOne = async (id, label) => {
+    const plan = await buildPlan({ sessionsRoot: liveSessionsRoot, only: [id], toCwd: liveWsNew.path })
+    const applied = await applyPlan(plan, { backupRoot: liveBackup, confirmed: true, intentPath: liveIntent })
+    console.log(`  [${label}] 规划 ${plan.summary.total} 条 / 迁移 ${applied.migrated ?? 0} 条 / ${applied.ok ? 'ok' : `失败 ${applied.reason}`}`)
+    return applied
+  }
+
+  // ── 情形 1：未打开的会话 ──
+  const closedId = `session-${randomUUID()}`
+  const closedHandle = await mkSession(closedId)
+  await closedHandle.close()
+  const closedSrc = join(liveOldDir, closedId)
+  check('阶段 10 / 情形 1：迁移前源目录在', await exists(closedSrc))
+  await migrateOne(closedId, '未打开的会话')
+  check('阶段 10 / 情形 1：源目录在运行中被成功删除（没被句柄锁住）', (await exists(closedSrc)) === false)
+
+  // 实时重读磁盘：官方 list() 会不会看到新 cwd？
+  const liveSnapshots = await persistence.list()
+  const closedSeen = liveSnapshots.find((snapshot) => snapshot.header.id === closedId)
+  check('阶段 10 / 情形 1：官方 list() 立刻看到新 cwd（它重读磁盘）',
+    closedSeen?.header.cwd === liveWsNew.path, { cwd: closedSeen?.header.cwd })
+
+  // 但在线层（attach）不重启能不能成功？
+  const attachLive = await registry.get(liveWsNew.id).attachSession(closedId).then(
+    () => ({ ok: true, error: '' }), (error) => ({ ok: false, error: String(error) })
+  )
+  console.log(`  [未打开的会话] 不重启直接 attach：${attachLive.ok ? '成功' : `失败 —— ${attachLive.error}`}`)
+  check('阶段 10 / 情形 1：**不重启 attach 会失败**（header 内存缓存）—— 与阶段 9 一致',
+    attachLive.ok === false && /cwd/.test(attachLive.error))
+
+  // ── 情形 2：正被打开的会话（还有写入方指着旧路径）──
+  const openId = `session-${randomUUID()}`
+  const openHandle = await mkSession(openId)
+  const openSrcLog = join(liveOldDir, openId, 'session.v4.jsonl.zstd')
+  const rawHandle = await open(openSrcLog, 'a')
+  const rawMarker = `RAW-MARKER-${randomUUID()}`
+  const openResult = await migrateOne(openId, '正打开的会话')
+  const openSrcGone = (await exists(join(liveOldDir, openId))) === false
+  console.log(`  [正打开的会话] 迁移后源目录消失：${openSrcGone}`)
+
+  // 写入方继续写 —— 这正是"边用边迁"会发生的事
+  let rawWriteError = null
+  try {
+    await rawHandle.write(`\n${rawMarker}\n`)
+    await rawHandle.sync()
+  } catch (error) {
+    rawWriteError = String(error)
+  }
+  await rawHandle.close().catch(() => {})
+  console.log(`  [正打开的会话] 迁移后继续写旧路径：${rawWriteError === null ? '写入**成功**（没报错）' : `报错 —— ${rawWriteError}`}`)
+
+  const newLog = join(liveNewDir, openId, 'session.v4.jsonl.zstd')
+  const oldSrcLogStillThere = await exists(openSrcLog)
+  const newHasMarker = (await exists(newLog)) && (await readFile(newLog)).includes(rawMarker)
+  const detected = Array.isArray(openResult.stillWriting) && openResult.stillWriting.length === 1
+  const locked = openResult.reason === 'source-locked'
+  const tombstone = detected ? openResult.stillWriting[0].tombstone : null
+  const markerPreserved = tombstone !== null && (await exists(tombstone))
+    && (await readFile(join(tombstone, 'session.v4.jsonl.zstd'))).includes(rawMarker)
+  const oldPathBack = await exists(join(liveOldDir, openId))
+  console.log(`  [正打开的会话] 工具走的是哪条安全路径：`
+    + `${locked ? '源被独占 ⇒ 干净中止（source-locked）' : detected ? '墓碑 + 探测到仍在被写' : '（都不是 —— 有风险！）'}`)
+  console.log(`  [正打开的会话] 源日志还在吗：${oldSrcLogStillThere}；目标目录留下了吗：${await exists(newLog)}；`
+    + `新写的事件留在墓碑里吗：${markerPreserved}`)
+
+  // 契约：**绝不允许静默丢事件**。两种安全路径都算过：
+  //   ① 源被独占 ⇒ 改名 EPERM ⇒ 干净中止：源与目标都没动，写入方写的仍是**原文件**（事件在里面）
+  //   ② 改名成功 ⇒ 事件跟着句柄进了墓碑 ⇒ 静默窗口探测到增长 ⇒ 保留墓碑并报错
+  const markerInSource = oldSrcLogStillThere && (await readFile(openSrcLog)).includes(rawMarker)
+  console.log(`  [正打开的会话] 那次写入在原文件里吗：${markerInSource}`)
+  const noSilentLoss = locked
+    ? (oldSrcLogStillThere && (await exists(newLog)) === false && markerInSource)
+    : (detected && markerPreserved)
+  check('阶段 10 / 情形 2：迁移后继续写旧路径**不会静默丢事件**'
+    + '（源被独占则干净中止且事件仍在原文件 / 否则事件留在墓碑里）', noSilentLoss, {
+    locked, detected, markerPreserved, markerInSource, oldSrcLogStillThere, newHasMarker, oldPathBack
+  })
+  check('阶段 10 / 情形 2：工具**如实报错**（ok=false），不假装成功',
+    openResult.ok === false && (locked || openResult.reason === 'source-still-being-written'))
+  check('阶段 10 / 情形 2：正被打开的会话**没有**被半途搬走（源目录仍在 ⇒ 现场干净）',
+    (await exists(join(liveOldDir, openId))) === true)
+  check('阶段 10：情形 2 一条都没搬成（宁可不做，也不丢数据）', openResult.migrated === 0)
+
+  await openHandle.close().catch(() => {})
 
   console.log('\n── 真实注册表（测试 DSH_HOME）──')
   console.log(JSON.stringify({ archivedSessionIds: [...archivedAfterReadd] }, null, 2))

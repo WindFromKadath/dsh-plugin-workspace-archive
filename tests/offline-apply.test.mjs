@@ -134,7 +134,7 @@ test('失败路径：规划之后源被弄坏 ⇒ 报 rewrite-failed 且**源仍
   assert.equal(result.ok, false)
   assert.equal(result.reason, 'rewrite-failed')
   assert.equal(await fileExists(plan.sessions[0].srcDir), true, '源必须还在')
-  assert.equal(result.migrated.length, 0)
+  assert.equal(result.migrated, 0)
 })
 
 test('verifyMigration：目标被动过就必须报出来', async () => {

@@ -216,6 +216,7 @@ export async function buildPlan(options) {
 
     sessions.push({
       sessionId: entry.sessionId,
+      logFile: entry.logFile ?? null,
       srcDir: entry.sessionDir,
       dstDir: dstSessionDir,
       srcLog: entry.logPath ?? null,

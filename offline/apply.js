@@ -22,6 +22,7 @@
 import { execFile } from 'node:child_process'
 import { cp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { setTimeout as sleep } from 'node:timers/promises'
 
 import { firstFrameEnd, readAllText, readHeader, rewriteHeaderCwd } from './frames.js'
 
@@ -155,13 +156,19 @@ export async function applyPlan(plan, options) {
   await writeFile(join(backupDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8')
   await writeFile(join(backupDir, 'plan.json'), JSON.stringify(plan, null, 2), 'utf8')
 
-  // ②③④ 逐条：改写 → 写新 → 自检 → 删源
+  // ②③④ 逐条：改写 → 写新 → 自检 → **把源改名成墓碑**（不是直接删）
+  //
+  // ⚠️ 为什么是"改名"而不是"删除"：实测（真机阶段 10）证明，若那条会话**正被打开**，
+  // 写入方拿着指向旧路径的句柄继续写 —— 删掉目录之后它**写入仍然成功、也不报错**，而数据
+  // 落到一个没有目录项的文件上，**静默丢失**。改名就不同：句柄跟着走到墓碑上，数据**留在
+  // 墓碑里**，于是"还在被写"这件事变成**可探测**的（见 ⑤ 的静默窗口）。
   const migrated = []
+  const tombstones = []
   for (const session of plan.sessions) {
     const source = await readFile(session.srcLog)
     const rewritten = await rewriteHeaderCwd(source, plan.toCwd)
     if (rewritten.ok !== true) {
-      return { ok: false, reason: 'rewrite-failed', sessionId: session.sessionId, detail: rewritten.reason, backupDir, migrated }
+      return { ok: false, reason: 'rewrite-failed', sessionId: session.sessionId, detail: rewritten.reason, backupDir, migrated: migrated.length, sessionIds: migrated }
     }
     await mkdir(dirname(session.dstLog), { recursive: true })
     const temporary = `${session.dstLog}.tmp-${process.pid}`
@@ -171,10 +178,62 @@ export async function applyPlan(plan, options) {
     const written = await readFile(session.dstLog)
     const check = verifyMigration(source, written, plan.toCwd)
     if (check.ok !== true) {
-      return { ok: false, reason: 'verify-failed', sessionId: session.sessionId, detail: check.reason, backupDir, migrated }
+      return { ok: false, reason: 'verify-failed', sessionId: session.sessionId, detail: check.reason, backupDir, migrated: migrated.length, sessionIds: migrated }
     }
-    await rm(session.srcDir, { recursive: true, force: true })
+    const tombstone = `${session.srcDir}.migrating-${process.pid}`
+    try {
+      await rename(session.srcDir, tombstone)
+    } catch (error) {
+      // 源被占用 ⇒ 有写入方（DSH 多半还在跑）。**绝不硬来**：把刚写出来的目标撤掉，保持现场干净。
+      await rm(dirname(session.dstLog), { recursive: true, force: true })
+      return {
+        ok: false,
+        reason: 'source-locked',
+        sessionId: session.sessionId,
+        detail: String(error),
+        backupDir,
+        migrated: migrated.length,
+        sessionIds: migrated,
+        hint: '源会话日志被占用 ⇒ DSH 很可能还在运行。请完全退出 DSH 后重跑'
+          + '（这正是 --i-have-stopped-dsh 这道闸门要防的情形）。源与目标都已复原，没有数据改动。'
+      }
+    }
+    tombstones.push({
+      sessionId: session.sessionId,
+      dir: tombstone,
+      logPath: join(tombstone, session.logFile),
+      size: (await stat(join(tombstone, session.logFile))).size
+    })
     migrated.push(session.sessionId)
+  }
+
+  // ⑤ 静默窗口：确认**没有人在写**墓碑。有人在写 ⇒ 说明"DSH 已停机"这个前提不成立，
+  // 数据（包括迁移之后新写的事件）都还在墓碑里 —— 保留它，并如实报错。
+  const settleMs = Number.isSafeInteger(options?.settleMs) && options.settleMs >= 0 ? options.settleMs : 1200
+  const stillWriting = []
+  if (tombstones.length > 0) {
+    await sleep(settleMs)
+    for (const entry of tombstones) {
+      const sizeAfter = await stat(entry.logPath).then((info) => info.size, () => -1)
+      if (sizeAfter !== entry.size) {
+        stillWriting.push({
+          sessionId: entry.sessionId,
+          tombstone: entry.dir,
+          sizeBefore: entry.size,
+          sizeAfter,
+          // 迁移之后新写的事件就在墓碑里 —— 用户可以自己捞，**没有丢**
+          hint: `迁移之后新写的事件仍在 ${entry.dir}，可用它补齐或据此回滚`
+        })
+      }
+    }
+  }
+  // 没人写 ⇒ 清掉墓碑（等价于原来的"删源"）；有人在写 ⇒ 一律保留，绝不删。
+  const stillWritingIds = new Set(stillWriting.map((item) => item.sessionId))
+  const removed = []
+  for (const entry of tombstones) {
+    if (stillWritingIds.has(entry.sessionId)) continue
+    await rm(entry.dir, { recursive: true, force: true })
+    removed.push(entry.sessionId)
   }
 
   // ⑤ 写意图给在线层。**哪怕是部分成功也要写** —— 已经搬过去的那些确实需要被挂回新工作区。
@@ -196,11 +255,22 @@ export async function applyPlan(plan, options) {
       })
       intentWritten = intentPath
     } catch (error) {
-      return { ok: false, reason: `intent-write-failed: ${String(error)}`, backupDir, migrated }
+      return { ok: false, reason: `intent-write-failed: ${String(error)}`, backupDir, migrated: migrated.length, sessionIds: migrated }
     }
   }
 
-  return { ok: true, backupDir, migrated: migrated.length, sessionIds: migrated, intentPath: intentWritten }
+  return {
+    // ⚠️ 探测到"还在被写"就是**失败**：`--i-have-stopped-dsh` 这个前提不成立，
+    // 用户必须知道。但**数据没丢** —— 迁移之后新写的事件都在墓碑里（见 `stillWriting[].hint`）。
+    ok: stillWriting.length === 0,
+    reason: stillWriting.length === 0 ? undefined : 'source-still-being-written',
+    stillWriting,
+    backupDir,
+    migrated: migrated.length,
+    sessionIds: migrated,
+    intentPath: intentWritten,
+    tombstonesRemoved: removed.length
+  }
 }
 
 /**
