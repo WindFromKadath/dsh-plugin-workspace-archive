@@ -12,7 +12,7 @@
  * 用法：npm run rm-test   （= node --import ./test/register.mjs .verify/real-machine.mjs）
  */
 
-import { mkdir, readFile, rm, stat, symlink } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rename, rm, stat, symlink } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -357,6 +357,125 @@ try {
     const unknown = await archiveCommand.handler({ rawInput: 'no-such-workspace-xyz', signal })
     check('命令对未知工作区返回 error（不猜、不动数据）', unknown?.kind === 'error', { result: unknown })
   }
+
+  // ── 阶段 8：文件夹改名场景复现（F022 / 官方讨论 #3012 的地基）────
+  // 目的：把"改文件夹名之后**今天**到底会怎样"变成可断言的事实，而不是猜。
+  // 本阶段**只观察、不做任何写修复**。用专属目录，避免干扰前面阶段。
+  const renameOld = join(root, '.verify', 'proj-rename')
+  const renameNew = join(root, '.verify', 'proj-renamed')
+  await rm(renameOld, { recursive: true, force: true })
+  await rm(renameNew, { recursive: true, force: true })
+  await mkdir(renameOld, { recursive: true })
+
+  const renameWs = await registry.create(renameOld)
+  const renameSession = `session-${randomUUID()}`
+  {
+    const handle = await persistence.create({
+      version: 4,
+      id: renameSession,
+      createdAt: Date.now(),
+      cwd: renameWs.path,
+      isSeeded: false,
+      delegationDepth: 0
+    })
+    await handle.flush()
+    await handle.close()
+    await renameWs.attachSession(renameSession)
+  }
+  await sleep(POLL_WAIT_MS) // 给插件一轮健康对账，把它记进台账
+
+  const headerBefore = (await persistence.list()).find((item) => item.header.id === renameSession)?.header
+  check('改名前：会话 header.cwd 精确等于工作区路径（这是 attach 的前提）', headerBefore?.cwd === renameWs.path, {
+    cwd: headerBefore?.cwd,
+    path: renameWs.path
+  })
+
+  // —— 用户在资源管理器里改名：等价于一次 fs rename ——
+  await rename(renameOld, renameNew)
+  await sleep(POLL_WAIT_MS * 2) // watcher 触发 + confirmDelayMs=0 的确认轮
+
+  check('改名后：官方 status() 变成 missing-dir（登记仍停在旧路径）', (await renameWs.status()) === 'missing-dir')
+  const rowsAfterRename = await readRows()
+  check(
+    '改名后：注册表里**没有**新路径的记录（官方不会跟随改名）',
+    rowsAfterRename.every((row) => row.path.toLowerCase() !== renameNew.toLowerCase()),
+    { paths: rowsAfterRename.map((row) => row.path) }
+  )
+  // 注册表 `workspaces` 是 `KvTable<WorkspaceId, WorkspaceRecord>`：id 是**映射的键**，不是记录的字段。
+  const rowMap = (await readJson(registryFile)).tables.workspaces
+  check(
+    '改名后：旧路径的登记仍在、成员表也还在（此刻尚未被 prune）',
+    (rowMap[renameWs.id]?.sessionIds ?? []).includes(renameSession),
+    { sessionIds: rowMap[renameWs.id]?.sessionIds }
+  )
+
+  // ⚠️ 核心发现（2026-10-11 实测）：改名**不会**立刻让插件归档。
+  const entryAfterRename = (await readJson(ledgerFile)).workspaces[renameWs.path.toLowerCase()]
+  check(
+    '改名后：台账里这条工作区**已经记过** ⇒ "没归档"不是因为它没被跟踪',
+    (entryAfterRename?.sessionIds ?? []).includes(renameSession),
+    { sessionIds: entryAfterRename?.sessionIds }
+  )
+  check(
+    '⚠️ 改名后：台账 missingSince 仍是 null ⇒ 插件**根本没被叫醒**（watcher 拿到的 filename 是新名字，不在被跟踪的 basename 集合里，事件被过滤掉了）',
+    entryAfterRename !== undefined && entryAfterRename.missingSince === null,
+    { missingSince: entryAfterRename?.missingSince }
+  )
+  check(
+    '改名后：因此这条会话此刻**还没有**被归档（对照组：删目录会走同一条链路并在同一窗口内归档）',
+    new Set((await readJson(registryFile)).global.archivedSessionIds ?? []).has(renameSession) === false,
+    { renameSession }
+  )
+
+  const sessionRoot = join(home, 'sessions')
+  let foundSlug = null
+  for (const slug of await readdir(sessionRoot)) {
+    if (await exists(join(sessionRoot, slug, renameSession))) {
+      foundSlug = slug
+      break
+    }
+  }
+  check(
+    '改名后：会话日志仍在盘上，且位于**旧路径**对应的 project 目录下（不会自己跟着目录走）',
+    foundSlug !== null && foundSlug.toLowerCase().includes('renamed') === false,
+    { foundSlug }
+  )
+
+  // —— 把改名后的目录当"新工作区"重新添加：官方只能新建一条空记录 ——
+  // 这一步同时会发 `domain/changed`，等于**强制叫醒**插件。
+  const readdAfterRename = await registry.create(renameNew)
+  check(
+    '重新添加新路径：得到一条**新的**工作区（新 id、0 成员），旧记录不会被复用',
+    readdAfterRename.id !== renameWs.id && readdAfterRename.sessionIds.length === 0,
+    { oldId: renameWs.id, newId: readdAfterRename.id }
+  )
+
+  await sleep(POLL_WAIT_MS)
+  check(
+    '被 domain/changed 叫醒之后：插件**立刻**把它归档了 ⇒ 缺的只是"醒来"，判据本身没问题',
+    new Set((await readJson(registryFile)).global.archivedSessionIds ?? []).has(renameSession) === true
+  )
+
+  let attachRefusal = null
+  try {
+    await readdAfterRename.attachSession(renameSession)
+  } catch (error) {
+    attachRefusal = error
+  }
+  check(
+    '重新添加新路径：**旧会话挂不过去**（attachSession 要求 header.cwd === 新路径）',
+    attachRefusal !== null,
+    { error: String(attachRefusal) }
+  )
+  const rowsAfterReadd = await readRows()
+  check(
+    '挂失败之后：新记录仍然是空的（校验先于写入，不产生半成品）',
+    (rowsAfterReadd.find((row) => row.id === readdAfterRename.id)?.sessionIds ?? []).length === 0
+  )
+  check(
+    '此时该会话是归档态 ⇒ 用户看到的是「历史被藏起来、而且挂不回新工作区」',
+    new Set((await readJson(registryFile)).global.archivedSessionIds ?? []).has(renameSession) === true
+  )
 
   console.log('\n── 真实注册表（测试 DSH_HOME）──')
   console.log(JSON.stringify({ archivedSessionIds: [...archivedAfterReadd] }, null, 2))

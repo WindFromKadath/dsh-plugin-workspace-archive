@@ -71,7 +71,7 @@
 
 ### 2.4 待勘察（不靠猜）
 
-1. header 完整字段与是否有其他 cwd 派生字段；2. `locate()` 是否严格按 `projectKey(cwd)` 目录查找（决定第 4 步是否必需）；3. projcache 冷读代价实测；4. 是否存在代际迁移摘要（`expectedPrefix.digest`）会被触发（初判只在 v3→v4 迁移路径）；5. `sessions/` 下是否还有别的按 slug 的索引。
+1. header 完整字段与是否有其他 cwd 派生字段；2. ~~`locate()` 是否严格按 `projectKey(cwd)` 目录查找（决定第 4 步是否必需）~~ → **已结案 2026-10-11，结论：严格按，第 4 步（搬目录）必需**。依据：`projectDir(root, cwd) = join(root, projectKey(cwd))`（`dsh-session-persistence-jsonl/lib/index.js:902-905`），`locate(meta)` 取 `logPath(this.root, meta.cwd, meta.id, …)`（`:2416-2420`）⇒ 日志位置**完全由 header 的 cwd 决定**，只改 header 不搬目录 = 官方在新路径下找不到日志；3. projcache 冷读代价实测；4. 是否存在代际迁移摘要（`expectedPrefix.digest`）会被触发（初判只在 v3→v4 迁移路径）；5. `sessions/` 下是否还有别的按 slug 的索引。
 
 ### 2.5 风险与缓解
 
@@ -80,3 +80,64 @@
 ### 2.6 落点建议（待定）
 
 T1 的真做法要直写 `sessions/` 与（可选）`storages/`，与本插件"只走官方 API + 零依赖"的两条立身之本冲突。建议 T1 做成**独立工具**（可复用本仓库的 `test/register.mjs` 与真机装置），本插件只保留 T0。
+
+## 3. 共用引擎：B（会话跨组迁移）与 C（工作区改名重绑定）
+
+> 2026-10-11 用户选中 **C（工作区改名重绑定）** 作为下一个功能，并指出「**C 其实是 B 的基础**」。核对后成立：两者共用**同一个离线改写引擎**，差额只在"登记"那一层。
+
+| 步骤 | B：会话跨组迁移 | C：工作区改名重绑定 |
+|---|---|---|
+| 预检（DSH 必须完全退出）+ 备份 + 回滚 | 需要 | **同一个** |
+| 只改第 0 帧 header 的 `cwd` | 需要 | **同一个** |
+| 把会话日志目录搬到新 `projectKey`（§2.4 #2 已结案：必需） | 需要 | **同一个** |
+| projcache 处理（5 字段 identity 或删记录） | 需要 | **同一个** |
+| 意图 sidecar → 启动后官方 `attachSession` | 需要 | **同一个** |
+| 目标工作区从哪来 | 从已有列表里挑 | 用户给新路径 |
+| **改工作区登记（delete 旧 + create 新）** | ❌ 不需要 | ✅ **C 独有** |
+| **搬本插件自己的台账条目**（按路径为键） | ❌ 不需要 | ✅ **C 独有** |
+
+**⇒ 引擎只写一次，B 和 C 都是它的前端。**
+**推荐顺序：先把引擎在 B 上跑通，再加 C 的登记层。** 理由是爆炸半径 —— B 不动登记，最坏情况只是"会话没搬过去"；C 要 `delete` 登记，最坏情况是"工作区没了"。引擎在 B 上验过之后，C 只剩两件可预测的事。
+
+### 3.1 C 独有的两层（2026-10-11，源码级新事实）
+
+1. **工作区 `path` 不可变，且官方没有改路径的通道。** `WorkspaceRegistry` 的全部写接口是 `create(path, title?)` / `delete(id)` / `resolveByPath(path)`（`dsh-workspace/lib/types/index.d.ts:145,180,264`）；`Workspace` 实体只有 `setTitle` / `attachSession` / `insertSessionBefore` / `detachSession`（`types.d.ts:69-127`，`path` 是只读 getter）⇒ 改路径**只能 `delete(旧) + create(新)`，得到新 id**。
+   - 这**不算绕开官方**：`types.d.ts:10-11` 明说 workspaceId *"A generated uuid, **never the path**: path normalization rewrites paths, and a reference anchor must stay stable."* ⇒ id 本来就不该与路径绑定。
+   - 注意 `create` 的路径会经 `fs.realpath` 规范化（`paths.d.ts:21-33`），且"同一路径重复 create 返回同一条"（`index.d.ts:136-140`）⇒ 幂等，可重入。
+2. **成员表是由 header cwd 投影出来的，且每次写操作都会 prune。** `entity.d.ts:22-25`：实体只见 "the canonical session-path index **backing the `sessionIds` projection**"；`mutate`（`:74-78`）*"pruning candidates that no longer pass the **id-plus-canonical-cwd membership check**"*。
+   - ⇒ **重绑定必须原子**：header 改了而登记没改（或反之）时，只要 DSH 在这中间启动并发生**任意一次** workspace 写，成员就会被永久 prune。这正是本插件台账存在的理由，也是 C 必须"**停机窗口内一次做完**"的根据。
+
+### 3.2 ⚠️ 实测修正（2026-10-11，真机装置阶段 8）：改名**不会**立刻触发归档
+
+我原先写的"改文件夹名后本插件会把那批会话归档"**只在别的事件或兜底轮询把插件叫醒之后才成立**。真机复现（`.verify/real-machine.mjs` 阶段 8，13 条断言，**51/51 通过**）给出的事实：
+
+| 事实 | 断言 |
+|---|---|
+| 改名后官方 `status()` = `missing-dir`，而登记仍停在旧路径 | 2 |
+| 官方**不会**跟随改名：注册表里没有新路径的记录 | 3 |
+| 旧登记与成员表此刻仍在（尚未被 prune） | 4 |
+| 台账**已经记过**这条工作区 ⇒ "没归档"不是因为没被跟踪 | 5 |
+| **但台账 `missingSince` 仍是 `null` ⇒ 插件根本没被叫醒** | 6 |
+| 因此改名后那段窗口内**没有**归档 | 7 |
+| 会话日志仍在**旧** `projectKey` 目录下，不会自己跟着目录走 | 8 |
+| 把新路径当新工作区添加 ⇒ **新 id、0 成员**，旧记录不会被复用 | 9 |
+| 一旦被 `domain/changed` 叫醒，插件**立刻**归档 ⇒ 缺的只是"醒来" | 10 |
+| 旧会话 `attachSession` 到新工作区**被拒**：*"its cwd …. does not resolve, so it cannot be validated"* | 11 |
+
+**根因**（`src/index.js:452-455`）：watcher 回调按**被跟踪目录的旧 basename 集合**过滤事件 ——
+
+```js
+const changed = typeof filename === 'string' ? filename.toLowerCase() : undefined
+if (changed === undefined || names.has(changed)) notifyChange()
+```
+
+改名时事件里的 `filename` 是**新名字**，不在 `names` 里 ⇒ 事件被丢弃。删目录走的是同一条链路、但 `filename` 恰好就是旧名字，所以**只有改名会漏**（`rmtree` 那种删法反而正常）。
+
+**⇒ 对 C 的影响（关键）**：改名之后"会话到底有没有被归档"**是不确定的** —— 取决于这段期间有没有别的注册表事件把插件叫醒、或有没有等满兜底轮询（默认 5 分钟）。C 的输入状态因此不确定。**建议先修这个唤醒缺口**（tasks.csv **F023**），让"改名 ⇒ 归档"像"删目录 ⇒ 归档"一样确定，C 的设计才有明确前提；否则 C 必须同时处理"已归档"与"未归档"两种输入，而其中一种几乎无法在真机里稳定复现。
+
+### 3.3 C 必须处理的层（修正版）
+
+1. **登记重绑**：`delete(旧)` + `create(新)` ⇒ 新 id（§3.1 已证 `path` 不可变）。`create` 幂等，可重入。
+2. **台账键迁移**：本插件台账按**路径**为键。重绑后条目仍挂在旧路径键下 ⇒ `/restore-workspace <新路径>` 查不到、且旧键永不再被 reconcile 触及。必须把条目从旧键迁到新键。
+3. **归档态保持，且**⚠️ **不能无脑 `unarchive`**：那会把**用户自己手动归档**的一起放出来。必须沿用 D015 的分账 —— `archivedSessionIds`（自动）与 `manualArchivedSessionIds`（手动）各自保持原样，只搬键。
+4. **验收必须包含**：「改名 + 重绑之后，用户的归档态与归档来源（手动/自动）全部保持不变」—— 否则就是把 F020 刚守住的那条线又踩了。
