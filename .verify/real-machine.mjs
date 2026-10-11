@@ -633,6 +633,72 @@ try {
   check('阶段 10 / 情形 1：**不重启 attach 会失败**（header 内存缓存）—— 与阶段 9 一致',
     attachLive.ok === false && /cwd/.test(attachLive.error))
 
+  // ──（插曲）探索：有没有任何**公开**办法，不重启就刷新那份 header 缓存？──
+  // 逐条试，每试一条就看 attach 是否变得可行。
+  const sessionsService = ctx.get('sessions')
+  const members = sessionsService === undefined ? [] : [...new Set([
+    ...Object.keys(sessionsService),
+    ...Object.getOwnPropertyNames(Object.getPrototypeOf(sessionsService) ?? {})
+  ])].filter((key) => key !== 'constructor')
+  console.log(`\n  [探索] ctx.get('sessions') = ${sessionsService === undefined ? 'undefined' : 'present'}`)
+  console.log(`  [探索] 它的成员：${members.join(', ')}`)
+  console.log(`  [探索] 有 get(id) 吗：${members.includes('get')}；有 refresh 吗：${members.includes('refresh')}`)
+
+  const probeAttach = async (label) => {
+    const r = await registry.get(liveWsNew.id).attachSession(closedId).then(
+      () => ({ ok: true, error: '' }), (error) => ({ ok: false, error: String(error) })
+    )
+    console.log(`  [探索] ${label} ⇒ attach ${r.ok ? '**成功（找到实时路径了！）**' : '仍然失败'}`)
+    return r.ok
+  }
+  let liveRoute = null
+  const candidates = [
+    // 宿主侧 sessions 服务没有 refresh/retain，但有 `create`（文档：*"Create or **adopt** a
+    // Session on the Host"*，且接受 `sessionId`）—— 如果"adopt"会去读日志，header 就是新读的。
+    ['sessions.create({ sessionId })', () => sessionsService?.create?.({ sessionId: closedId })],
+    ['sessions.create({ sessionId, cwd })', () => sessionsService?.create?.({ sessionId: closedId, cwd: liveWsNew.path })],
+    ['sessions.prepare?(id)', () => sessionsService?.prepare?.(closedId)],
+    ['sessions.liveEntryFor?(id)', () => sessionsService?.liveEntryFor?.(closedId)]
+  ]
+  for (const [name, call] of candidates) {
+    let value
+    try {
+      value = call()
+    } catch (error) {
+      console.log(`  [探索] ${name} —— 调用即抛错：${String(error).slice(0, 100)}`)
+      continue
+    }
+    if (value === undefined) {
+      console.log(`  [探索] ${name} —— 这个方法不存在，跳过`)
+      continue
+    }
+    try {
+      await value
+    } catch (error) {
+      console.log(`  [探索] ${name} —— 抛错：${String(error).slice(0, 120)}`)
+    }
+    if (await probeAttach(name)) {
+      liveRoute = name
+      break
+    }
+  }
+  if (liveRoute === null) console.log('  [探索] 公开路径全军覆没 —— 没有实时办法')
+
+  // **对照**（不是可用方案）：直接调**内部**方法重建索引。
+  // 它成功 = 证明"唯一拦路的就是这份缓存"，也就证明"上游若给出公开入口，实时就能成立"。
+  let controlOk = null
+  try {
+    await registry.replaceHeaderIndex(await registry.listStoredHeaders())
+    controlOk = await registry.get(liveWsNew.id).attachSession(closedId).then(() => true, () => false)
+  } catch (error) {
+    console.log(`  [对照] 内部方法调用失败（不在公开面上，符合预期）：${String(error).slice(0, 100)}`)
+  }
+  console.log(`  [对照] 直接调内部 replaceHeaderIndex() 之后 attach：${controlOk === true ? '**成功** ⇒ 拦路的就是那份缓存，实锤' : '仍失败'}`)
+  check('阶段 11：**公开**路径无法刷新 header 缓存（所以实时不成立）',
+    liveRoute === null, { liveRoute, members })
+  check('阶段 11：**对照**证明"内部重建索引"之后 attach 可行 ⇒ 缺的只是公开入口',
+    controlOk === true)
+
   // ── 情形 2：正被打开的会话（还有写入方指着旧路径）──
   const openId = `session-${randomUUID()}`
   const openHandle = await mkSession(openId)
