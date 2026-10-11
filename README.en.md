@@ -21,11 +21,14 @@ The plugin supplies the missing link. It never touches `app.asar`, never writes 
 | The workspace registration is removed ("Delete workspace") while the folder stays | Treated the same as a disappearance, and archived — otherwise those conversations fall into "no project". **This one skips the confirmation window**: the official removal is immediate, so waiting would leave those conversations scattered in the sidebar in front of you |
 | The folder or the registration comes back | The sessions this plugin archived are **unarchived**; and **every member recorded in the plugin's ledger** is re-attached to the workspace at that path — including sessions that were **already archived before the disappearance** (typically ones you archived yourself) |
 | A session sits in "Ungrouped" but its working directory **is** a registered workspace path | It is attached to that workspace once, at start-up (condition: in no workspace's member list + the directory matches **exactly**; disable with `adoptUngrouped: false`) |
+| **You ask it to "archive this workspace"** (the model calls the `workspace_archive` tool) | Every session of that workspace **not already archived** is archived; `action='unarchive'` restores — but **only the batch this tool archived**, leaving anything you archived yourself in the official UI untouched. (Note: archiving is **not** hiding the workspace row — the official client shows every group; the row stays, just empty) |
+| **You type** `/archive-workspace <path or title>` (or `/restore-workspace <…>`) | The **same action** as the row above, but **triggered by you, without going through the model**. The command is registered host-side (official `dsh-commands`) and shows up in the composer's command popup; restore uses the same separate list — so it **never** releases sessions you archived yourself in the official UI |
 
-Two rules the plugin always keeps:
+Three rules the plugin always keeps:
 
 - **Sessions you archived yourself are never unarchived**: they only get their grouping back, and stay hidden until you unarchive them.
 - **Archive and restore only ever handle sessions it has recorded**: the ledger is written while the plugin runs and the workspace is healthy, and that path never scans by working directory. The one exception is the start-up **adoption** pass (last row above).
+- **Manual and automatic archives are two separate lists that never undo each other**: a workspace you archived on purpose is not released when its folder disappears and comes back, and a manual restore never touches the automatic batch.
 
 ## Why this works (the key mechanism)
 
@@ -61,8 +64,8 @@ Three ways, the first one recommended:
 
 ## Verification
 
-- `npm test` — **52 offline assertions** (tool behaviour, the decision layer, the ledger, real Cordis loading, the adoption selection logic, the two-tier disappearance confirmation, and the "plugin source must not import host packages" regression).
-- `npm run rm-test` — **27 assertions against a real DSH runtime** in a throwaway `DSH_HOME`: create workspace → create two real sessions → delete the folder → assert exactly the right session is archived → put the folder back → assert it is restored and re-attached, while a session archived by the "user" stays archived → delete the registration and re-add it → assert both come back to the group → an ungrouped orphan session is adopted.
+- `npm test` — **78 offline assertions** (tool behaviour, the decision layer, the ledger, real Cordis loading, the adoption selection logic, the two-tier disappearance confirmation, **the manual workspace-archive decision layer and its tool-definition contract**, **slash-command registration and handler behaviour**, and the "plugin source must not import host packages" regression).
+- `npm run rm-test` — **38 assertions against a real DSH runtime** in a throwaway `DSH_HOME`: create workspace → create two real sessions → delete the folder → assert exactly the right session is archived → put the folder back → assert it is restored and re-attached, while a session archived by the "user" stays archived → delete the registration and re-add it → assert both come back to the group → an ungrouped orphan session is adopted → **commands: `/archive-workspace` and `/restore-workspace` really register in a real `dsh-commands` runtime and really archive/restore** (with 3 controls proving the lookup path, the definition shape and the `inject` wiring each work).
 - `npm run check` — syntax.
 
 Both suites are re-runnable and never touch a real profile or a real workspace folder. See [MAINTAINER.md](MAINTAINER.md) for the design constraints, adopted decisions and evidence trail.

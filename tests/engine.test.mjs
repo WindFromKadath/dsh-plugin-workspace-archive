@@ -156,6 +156,84 @@ test('删除工作区登记：本进程见过的登记 → 同一轮对账内归
   engine.dispose()
 })
 
+test('手动归档工作区：只归档官方尚未归档的，并记进**独立**清单', async () => {
+  const world = fakeWorld({ archived: ['s1'] }) // s1 = 用户自己在官方界面里归档的
+  const { engine, ledger } = await makeEngine(world)
+
+  const result = await engine.manualWorkspace({ query: '<repo>\\proj', action: 'archive' })
+
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.sessionIds, ['s2'])
+  assert.equal(result.skipped, 1, 's1 已在官方归档集合里 ⇒ 不由我们接管')
+  assert.deepEqual(world.state.calls, [['archive', 's2']])
+  assert.deepEqual(ledger.entry('<repo>\\proj').manualArchivedSessionIds, ['s2'])
+  assert.deepEqual(ledger.entry('<repo>\\proj').archivedSessionIds, [], '不能混进自动归档清单')
+})
+
+test('手动恢复：只放回本工具归档的那些，用户自己归档的原样保留', async () => {
+  const world = fakeWorld({ archived: ['s1'] })
+  const { engine } = await makeEngine(world)
+  await engine.manualWorkspace({ query: 'proj', action: 'archive' }) // 按标题解析；归档 s2
+
+  world.state.calls.length = 0
+  const back = await engine.manualWorkspace({ query: 'proj', action: 'unarchive' })
+
+  assert.deepEqual(back.sessionIds, ['s2'])
+  assert.deepEqual(world.state.calls, [['unarchive', 's2']])
+  assert.equal(world.state.archived.has('s1'), true, '用户自己归档的 s1 必须保持归档')
+  assert.equal(world.state.archived.has('s2'), false)
+})
+
+test('手动归档不被「目录消失又回来」的自动恢复撤销（两份清单必须分开）', async () => {
+  const world = fakeWorld()
+  const { engine, ledger } = await makeEngine(world)
+  await engine.tick() // 健康一轮，台账记下成员
+
+  const manual = await engine.manualWorkspace({ query: 'proj', action: 'archive' })
+  assert.deepEqual(manual.sessionIds, ['s1', 's2'])
+
+  world.state.calls.length = 0
+  world.state.exists = false // 目录消失
+  await engine.tick()
+  await engine.tick() // confirmDelayMs=0 ⇒ 第二轮确认
+  world.state.exists = true // 目录回来
+  await engine.tick()
+
+  assert.deepEqual(
+    world.state.calls,
+    [],
+    '手动归档过的会话既不该被自动流程重复归档，也不该被它自动放回来'
+  )
+  assert.equal(world.state.archived.has('s1'), true, '手动归档必须保持')
+  assert.equal(world.state.archived.has('s2'), true, '手动归档必须保持')
+  assert.deepEqual(ledger.entry('<repo>\\proj').manualArchivedSessionIds, ['s1', 's2'])
+  assert.deepEqual(ledger.entry('<repo>\\proj').archivedSessionIds, [], '自动清单始终没被写入')
+})
+
+test('手动归档：解析不唯一时拒绝并列候选，一个会话都不动', async () => {
+  const world = fakeWorld()
+  const { engine } = await makeEngine(world)
+  world.state.title = 'proj'
+  // 造一个同标题的第二个工作区：解析必须拒绝，而不是猜一个。
+  const twin = {
+    id: 'ws-2',
+    path: '<repo>\\proj-twin',
+    title: 'proj',
+    get sessionIds() { return ['s9'] },
+    status: async () => 'ok',
+    async attachSession() {}
+  }
+  const original = world.registry.list
+  world.registry.list = () => [...original(), twin]
+
+  const result = await engine.manualWorkspace({ query: 'proj', action: 'archive' })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'ambiguous')
+  assert.equal(result.candidates.length, 2)
+  assert.deepEqual(world.state.calls, [], '解析不唯一时不得动任何会话')
+})
+
 test('台账先落盘、后调官方归档（防 prune 的硬约束）', async () => {
   const world = fakeWorld()
   const { engine, file } = await makeEngine(world)

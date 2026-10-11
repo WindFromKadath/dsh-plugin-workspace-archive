@@ -245,6 +245,119 @@ try {
     (row) => row.path.toLowerCase() === adoptWorkspace.path.toLowerCase()
   ).length === 1, { workspaces: rowsAfterAdopt.map((row) => row.path) })
 
+  // ── 阶段 7：斜杠命令入口（F021）──────────────────────────────────
+  // 目的：把"命令真的注册进真宿主"和"命令真的能归档/恢复"变成端到端断言。
+  // 用一个**专属**工作区 + 两个会话，避免干扰阶段 1–6 的断言。
+  const commands = ctx.get('commands')
+  check('命令服务存在（装置已挂 @deepseek-ai/dsh-commands）', commands !== undefined)
+
+  // 对照：装置**自己**注册一条命令，证明 `find(undefined, …)`（无 agent 的全局查询）本身可用。
+  // 它区分两种失败：查询路径不可用 vs 本插件没注册成功。
+  let controlFound
+  try {
+    commands?.register({ name: 'rm-test-control', description: '装置对照命令', handler: () => ({ kind: 'success' }) })
+    controlFound = commands?.find(undefined, 'rm-test-control')
+  } catch (error) {
+    report.phases.push({ phase: 'commands-control-threw', error: String(error) })
+    controlFound = undefined
+  }
+  check('对照：装置自己注册的命令能被 find(undefined, …) 查到（证明查询路径可用）', controlFound !== undefined)
+
+  // 对照 B：用**本插件同款的定义形状**（name/description/input.hint/handler）直接注册。
+  // 它把"定义形状不被接受"与"插件的 inject 没触发"两种失败分开。
+  let shapeFound
+  try {
+    commands?.register({
+      name: 'rm-test-shape',
+      description: '同款定义形状',
+      input: { hint: '工作区路径或显示标题' },
+      handler: async () => ({ kind: 'success', text: 'ok' })
+    })
+    shapeFound = commands?.find(undefined, 'rm-test-shape')
+  } catch (error) {
+    report.phases.push({ phase: 'commands-shape-threw', error: String(error) })
+    shapeFound = undefined
+  }
+  check('对照 B：本插件同款定义形状能在真宿主注册成功', shapeFound !== undefined)
+
+  // 对照 C：**完全照本插件的接线方式** —— 在 `ctx.inject([...])` 回调里注册。
+  // 它把"inject 没触发 / scope.get 取不到"与"定义或注册本身的问题"彻底分开。
+  let injectFound
+  try {
+    ctx.inject(['commands'], (scope) => {
+      const c = typeof scope?.get === 'function' ? scope.get('commands') : undefined
+      report.phases.push({ phase: 'commands-inject', scopeIsUndefined: scope === undefined, gotService: c !== undefined })
+      c?.register({ name: 'rm-test-inject', description: 'inject 对照', handler: async () => ({ kind: 'success' }) })
+    })
+    await sleep(500)
+    injectFound = commands?.find(undefined, 'rm-test-inject')
+  } catch (error) {
+    report.phases.push({ phase: 'commands-inject-threw', error: String(error) })
+    injectFound = undefined
+  }
+  check('对照 C：从 ctx.inject([commands]) 回调里注册的命令可见', injectFound !== undefined)
+
+  let archiveCommand
+  try {
+    // 插件在普通上下文注册 = 全局命令；没有 agent 时按全局层查。
+    archiveCommand = commands?.find(undefined, 'archive-workspace')
+  } catch (error) {
+    report.phases.push({ phase: 'commands-find-threw', error: String(error) })
+    archiveCommand = undefined
+  }
+  check('斜杠命令已注册进真宿主注册表：/archive-workspace', archiveCommand !== undefined, {
+    mounted: commands !== undefined
+  })
+  let restoreCommand
+  try {
+    restoreCommand = commands?.find(undefined, 'restore-workspace')
+  } catch {
+    restoreCommand = undefined
+  }
+  check('斜杠命令已注册进真宿主注册表：/restore-workspace', restoreCommand !== undefined)
+
+  if (archiveCommand !== undefined && restoreCommand !== undefined) {
+    const cmdDir = join(root, '.verify', 'proj-cmd')
+    await mkdir(cmdDir, { recursive: true })
+    const cmdWorkspace = await registry.create(cmdDir)
+    const cmdA = `session-${randomUUID()}`
+    const cmdB = `session-${randomUUID()}`
+    for (const id of [cmdA, cmdB]) {
+      const handle = await persistence.create({
+        version: 4,
+        id,
+        createdAt: Date.now(),
+        cwd: cmdWorkspace.path,
+        isSeeded: false,
+        delegationDepth: 0
+      })
+      await handle.flush()
+      await handle.close()
+      await cmdWorkspace.attachSession(id)
+    }
+    const signal = new AbortController().signal
+
+    // 直接调 handler：验证"注册成功"之外的**行为**（rawInput 里的分隔空白由引擎 trim）。
+    const archived = await archiveCommand.handler({ rawInput: `  ${cmdWorkspace.path}  `, signal })
+    check('命令 /archive-workspace 返回 success', archived?.kind === 'success', { result: archived })
+    const afterArchive = new Set((await readJson(registryFile)).global.archivedSessionIds ?? [])
+    check('命令真的归档了该工作区的会话（以真注册表为准）', afterArchive.has(cmdA) && afterArchive.has(cmdB), {
+      cmdA,
+      cmdB
+    })
+
+    const restored = await restoreCommand.handler({ rawInput: cmdWorkspace.path, signal })
+    check('命令 /restore-workspace 返回 success', restored?.kind === 'success', { result: restored })
+    const afterRestore = new Set((await readJson(registryFile)).global.archivedSessionIds ?? [])
+    check('命令真的放回了那批（恢复走的仍是 D015 的独立清单）', afterRestore.has(cmdA) === false && afterRestore.has(cmdB) === false, {
+      cmdA,
+      cmdB
+    })
+
+    const unknown = await archiveCommand.handler({ rawInput: 'no-such-workspace-xyz', signal })
+    check('命令对未知工作区返回 error（不猜、不动数据）', unknown?.kind === 'error', { result: unknown })
+  }
+
   console.log('\n── 真实注册表（测试 DSH_HOME）──')
   console.log(JSON.stringify({ archivedSessionIds: [...archivedAfterReadd] }, null, 2))
   console.log('── 台账 ──')

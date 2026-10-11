@@ -29,6 +29,12 @@
 - id: workspace
   name: '@deepseek-ai/dsh-workspace'
 
+# 命令注册表（F021）：让本插件的 /archive-workspace、/restore-workspace 有个真宿主可注册，
+# 从而把"命令真的注册成功了"变成端到端断言，而不是只靠离线替身。
+# 不需要 agent-loop：插件在**普通上下文**注册 = 全局命令。
+- id: commands
+  name: '@deepseek-ai/dsh-commands'
+
 - id: workspace-archive
   name: dsh-plugin-workspace-archive
   config:

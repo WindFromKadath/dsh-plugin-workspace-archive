@@ -18,10 +18,15 @@
  *       "workspaceId": "官方记录 id",       // 与当前注册表不一致 ⇒ 记录被删掉后重建（= 一次消失）
  *       "sessionIds": ["session-a"],      // 最近一次健康时看到的成员
  *       "missingSince": "ISO" | null,     // 首次确认缺失的时间
- *       "archivedSessionIds": ["session-a"] // 本插件亲手归档的（恢复的唯一依据）
+ *       "archivedSessionIds": ["session-a"], // **自动**归档的（目录消失触发；目录回归时按它恢复）
+ *       "manualArchivedSessionIds": ["session-b"] // **手动**归档的（用户显式动作；只有手动恢复才处理）
  *     }
  *   }
  * }
+ *
+ * ⚠️ 两份归档清单必须分开：手动归档是用户的明确意图，**不能被"目录消失又回来"的自动恢复流程撤销**。
+ * 自动恢复只看 `archivedSessionIds`，手动恢复只看 `manualArchivedSessionIds`，两者永不交叉。
+ * （官方那侧仍是裸集合，所以"用户自己在官方 UI 里归档的"依旧不在任何清单里、永不被我们触碰。）
  *
  * @module dsh-plugin-workspace-archive/ledger
  */
@@ -132,7 +137,8 @@ export class LedgerStore {
       workspaceId: typeof workspaceId === 'string' && workspaceId.length > 0 ? workspaceId : previous?.workspaceId,
       sessionIds: [...sessionIds],
       missingSince: null,
-      archivedSessionIds: previous?.archivedSessionIds ?? []
+      archivedSessionIds: previous?.archivedSessionIds ?? [],
+      manualArchivedSessionIds: previous?.manualArchivedSessionIds ?? []
     }
     this.data.workspaces[key] = entry
     return entry
@@ -179,6 +185,39 @@ export class LedgerStore {
     if (entry === undefined) return undefined
     const done = new Set(sessionIds)
     entry.archivedSessionIds = entry.archivedSessionIds.filter((id) => !done.has(id))
+    return entry
+  }
+
+  /**
+   * 记录「用户手动归档了这些会话」（F020 的独立清单）。
+   *
+   * 与 {@link recordArchived} 分开是刻意的：手动归档不能被"目录消失又回来"的自动恢复流程撤销。
+   * @param path - 工作区路径。
+   * @param sessionIds - 已归档的会话 id。
+   * @returns 该条目。
+   */
+  recordManualArchived(path, sessionIds) {
+    const key = pathKey(path)
+    const entry = this.data.workspaces[key]
+    if (entry === undefined) return undefined
+    const set = new Set(entry.manualArchivedSessionIds ?? [])
+    for (const id of sessionIds) set.add(id)
+    entry.manualArchivedSessionIds = [...set]
+    return entry
+  }
+
+  /**
+   * 记录「这些会话已从手动归档里恢复」，从手动清单移除。
+   * @param path - 工作区路径。
+   * @param sessionIds - 已恢复的会话 id。
+   * @returns 该条目。
+   */
+  recordManualRestored(path, sessionIds) {
+    const key = pathKey(path)
+    const entry = this.data.workspaces[key]
+    if (entry === undefined) return undefined
+    const done = new Set(sessionIds)
+    entry.manualArchivedSessionIds = (entry.manualArchivedSessionIds ?? []).filter((id) => !done.has(id))
     return entry
   }
 

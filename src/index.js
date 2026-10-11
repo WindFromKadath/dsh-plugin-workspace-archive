@@ -4,9 +4,10 @@
  * 需求②：工作区目录被删除/移走后，把它下面**由本插件登记过的**会话归档；
  * 同一个目录回来后，**只**恢复这批会话，绝不碰用户自己手动归档的会话。
  *
- * 三层结构（各自可单独测试）：
+ * 四层结构（各自可单独测试）：
  *   - `src/ledger.js`  sidecar 台账：路径 → 会话 id，先落盘再动官方归档；
- *   - `src/policy.js`  纯决策：去抖后决定这一轮归档谁、恢复谁；
+ *   - `src/policy.js`  纯决策：去抖后决定这一轮归档谁、恢复谁（**目录消失的自动路径**）；
+ *   - `src/manual.js`  纯决策：**手动**归档/恢复一个工作区（F020，模型可见工具 `workspace_archive`）；
  *   - 本文件          接线：读官方注册表、执行官方 API、管定时器与 dryRun。
  *
  * 只走官方入口：`ctx.workspaceRegistry.list()` / `Workspace.status()` /
@@ -31,6 +32,7 @@ import { basename, dirname, join } from 'node:path'
 
 import { adoptUngrouped } from './adopt.js'
 import { LedgerStore, pathKey } from './ledger.js'
+import { planManual, resolveWorkspace } from './manual.js'
 import { createProbeState, evaluate } from './policy.js'
 
 /** Loader 行名。 */
@@ -330,6 +332,99 @@ export function createEngine(deps) {
   }
 
   /**
+   * **手动**归档 / 恢复一个工作区（F020）。
+   *
+   * 与自动路径完全分开：只碰台账的 `manualArchivedSessionIds`，**绝不碰** `archivedSessionIds`
+   * —— 所以"目录消失又回来"的自动恢复不会撤销用户的手动归档，反之亦然。
+   *
+   * 解析不唯一时**拒绝并列候选**，不猜。`dryRun` 下只记日志。
+   * @param options - `query`（工作区路径或标题）/ `action`（`'archive'` | `'unarchive'`）。
+   * @returns 结果对象；`ok: false` 时带 `reason`（与工具 `output.schema` **逐字段一致**）。
+   */
+  async function manualWorkspace(options) {
+    const action = options?.action === 'unarchive' ? 'unarchive' : 'archive'
+    const entityList = registry.list()
+    const projection = entityList.map((workspace) => ({
+      id: workspace.id,
+      path: workspace.path,
+      title: workspace.title,
+      sessionIds: [...workspace.sessionIds]
+    }))
+    const resolved = resolveWorkspace(projection, options?.query)
+    if (resolved.ok !== true) return resolved
+
+    const workspace = resolved.workspace
+    // 手动动作的入口：先把这条工作区的健康视图刷进台账（恢复要靠它）。
+    ledger.syncHealthy(workspace.path, workspace.title, workspace.sessionIds, workspace.id)
+    const entry = ledger.entry(workspace.path)
+    const plan = planManual({
+      workspace,
+      alreadyArchived: new Set(registry.archivedSessionIds ?? []),
+      entry,
+      action
+    })
+
+    const base = {
+      ok: true,
+      kind: plan.kind,
+      path: workspace.path,
+      title: workspace.title,
+      requested: plan.sessionIds.length,
+      skipped: plan.skipped.length,
+      dryRun: config.dryRun === true
+    }
+    if (config.dryRun === true) {
+      logger?.info?.(
+        `workspace-archive[dryRun]: 将手动${plan.kind === 'archive' ? '归档' : '恢复'} `
+        + `${plan.sessionIds.length} 个会话 @ ${workspace.path}`
+      )
+      return { ...base, applied: 0, sessionIds: [] }
+    }
+
+    const applied = []
+    if (plan.kind === 'archive') {
+      if (plan.sessionIds.length === 0) {
+        await ledger.save()
+        return { ...base, applied: 0, sessionIds: [] }
+      }
+      // 沿用硬约束：先落台账，再动官方（id 会被下一次 workspace 写操作永久 prune）。
+      ledger.recordManualArchived(workspace.path, plan.sessionIds)
+      await ledger.save()
+      for (const sessionId of plan.sessionIds) {
+        try {
+          await registry.archiveSession(sessionId)
+          applied.push(sessionId)
+          logger?.info?.(`workspace-archive: 手动归档 ${sessionId}（${workspace.path}）`)
+        } catch (error) {
+          if (isActiveSessionRefusal(error)) {
+            // 会话还在跑：跳过，绝不强停用户正在进行的工作。
+            logger?.warn?.(`workspace-archive: 跳过仍在运行的 ${sessionId}（${workspace.path}）`)
+            continue
+          }
+          logger?.warn?.(`workspace-archive: 手动归档 ${sessionId} 失败：${String(error)}`)
+        }
+      }
+      return { ...base, applied: applied.length, sessionIds: applied }
+    }
+
+    // 恢复：先解归档，再按**实际成功**的改台账（失败的留着重试）。
+    for (const sessionId of plan.sessionIds) {
+      try {
+        await registry.unarchiveSession(sessionId)
+        applied.push(sessionId)
+        logger?.info?.(`workspace-archive: 手动恢复 ${sessionId}（${workspace.path}）`)
+      } catch (error) {
+        logger?.warn?.(`workspace-archive: 手动恢复 ${sessionId} 失败：${String(error)}`)
+      }
+    }
+    if (applied.length > 0) {
+      ledger.recordManualRestored(workspace.path, applied)
+      await ledger.save()
+    }
+    return { ...base, applied: applied.length, sessionIds: applied }
+  }
+
+  /**
    * 让 watcher 集合与"当前跟踪的路径"一致：每个工作区目录的**父目录**挂一个非递归 watcher，
    * 目录被删/改名/重建时立刻收到事件。宿主对"目录消失"没有任何事件，这是唯一的事件源。
    * 失效（网络盘、句柄上限、watcher error）只记日志并退回兜底轮询，绝不让插件失败。
@@ -463,7 +558,7 @@ export function createEngine(deps) {
     return actions
   }
 
-  return { tick, notifyChange, dispose }
+  return { tick, notifyChange, manualWorkspace, dispose }
 }
 
 /**
@@ -491,6 +586,162 @@ export function scheduleInterval(ctx, run, intervalMs) {
 }
 
 /**
+ * 构造「手动归档一个工作区」的 `ToolDefinition`（F020）。
+ *
+ * **为什么手写而不是 import `defineTool`**：本插件的零运行时依赖是硬约束（D009）——junction 装载下
+ * 解析宿主包会 `ERR_MODULE_NOT_FOUND`，插件直接装载失败。而 `ToolSchema.parameters` 本来就是
+ * **普通 JSON Schema**（`dsh-llm` 的 `ToolSchema.parameters: Record<string, unknown>`），
+ * `output.render` 只要返回 `[{ type: 'text', text }]`，所以整份定义可以零 import 手写。
+ *
+ * ⚠️ `output.schema` 是**硬校验**：`execute` 多返回一个未声明字段，整次调用就会变成
+ * `returned invalid output`（`dsh-plugin-branch` V21 踩过）⇒ **加返回字段必须同时改这里**。
+ *
+ * @param engine - `createEngine()` 的返回值（要用它的 `manualWorkspace`）。
+ * @returns 可直接交给 `ctx.tools.register()` 的定义。
+ */
+export function defineManualTool(engine) {
+  return {
+    name: 'workspace_archive',
+    description:
+      '手动归档一个工作区：把它名下**官方尚未归档**的会话收进归档（默认），'
+      + "或用 action='unarchive' 恢复此前由本工具归档的那些。"
+      + '只处理该工作区成员表里的会话；用户自己在官方界面里归档的会话永不被触碰。'
+      + '归档只是隐藏、不删任何数据，随时可用 action=\'unarchive\' 放回。',
+    parameters: {
+      type: 'object',
+      properties: {
+        workspace: {
+          type: 'string',
+          description: '工作区路径（精确匹配，优先）或它的显示标题'
+        },
+        action: {
+          type: 'string',
+          description: "archive（默认）= 归档；unarchive = 恢复本工具此前归档的那些"
+        }
+      },
+      required: ['workspace'],
+      additionalProperties: false
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          kind: { type: 'string' },
+          path: { type: 'string' },
+          title: { type: 'string' },
+          requested: { type: 'number' },
+          skipped: { type: 'number' },
+          applied: { type: 'number' },
+          dryRun: { type: 'boolean' },
+          sessionIds: { type: 'array', items: { type: 'string' } },
+          reason: { type: 'string' },
+          candidates: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { path: { type: 'string' }, title: { type: 'string' } },
+              required: ['path', 'title'],
+              additionalProperties: false
+            }
+          }
+        },
+        required: ['ok'],
+        additionalProperties: false
+      },
+      render: (_args, value) => [{ type: 'text', text: renderManualResult(value) }]
+    },
+    execute: async (args) => engine.manualWorkspace({
+      query: args?.workspace,
+      action: args?.action
+    })
+  }
+}
+
+/**
+ * 把 `manualWorkspace` 的结果渲染成模型可读的一段话。纯函数。
+ * @param value - `manualWorkspace` 的返回值。
+ * @returns 文本。
+ */
+export function renderManualResult(value) {
+  if (value?.ok === false) {
+    if (value.reason === 'ambiguous') {
+      const lines = (value.candidates ?? []).map((c) => `- ${c.path}（${c.title}）`)
+      return `解析到多个工作区，请给出更精确的路径：\n${lines.join('\n')}`
+    }
+    if (value.reason === 'empty-query') return '没有给出工作区：请传路径或标题。'
+    return '没有找到匹配的工作区（路径需精确匹配，可用显示标题）。'
+  }
+  const doing = value?.kind === 'unarchive' ? '恢复' : '归档'
+  const head = `${doing}「${value?.title}」(${value?.path})：`
+  if (value?.dryRun === true) return `${head}dryRun 模式下仅演练 —— 计划处理 ${value?.requested} 个会话，未改动任何数据。`
+  if ((value?.requested ?? 0) === 0) {
+    const why = value?.kind === 'unarchive' ? '没有由本工具归档过的会话' : '没有需要归档的会话（可能都已在归档里）'
+    return `${head}${why}。`
+  }
+  const skipped = value?.skipped > 0 ? `，跳过 ${value.skipped} 个（已在官方归档集合里，不由本工具接管）` : ''
+  return `${head}已${doing} ${value?.applied}/${value?.requested} 个会话${skipped}。`
+}
+
+/**
+ * 本插件注册的斜杠命令（F021）。
+ *
+ * 与模型可见工具 `workspace_archive` **共用同一个引擎函数**：命令只是"由人触发"的第二个入口，
+ * **不复制任何归档/恢复逻辑**（台账分账、dryRun、解析不唯一即拒绝、绝不碰用户手动归档的会话，
+ * 全部由 `engine.manualWorkspace` 继承）。命令本身会写进会话日志（`command/run` / `command/done`），
+ * 所以"谁在什么时候归档了哪个工作区"是可审计的。
+ */
+export const COMMANDS = [
+  {
+    name: 'archive-workspace',
+    action: 'archive',
+    description: '归档一个工作区的全部对话（只处理官方尚未归档的；你自己归档的不动）'
+  },
+  {
+    name: 'restore-workspace',
+    action: 'unarchive',
+    description: '放回此前由本插件归档的那个工作区的对话'
+  }
+]
+
+/**
+ * 把命令注册进宿主的命令注册表（`ctx.commands`）。
+ *
+ * **逐条 try/catch**：一条注册失败不影响另一条，也绝不拖垮插件（与工具注册同一套 fail-safe）。
+ * 纯宿主侧，不需要客户端半边 —— 命令的发现与渲染由官方的 `dsh-client-ui-commands` 负责。
+ *
+ * @param runtime - `ctx.commands`（或测试替身）。
+ * @param engine - `createEngine()` 的返回值。
+ * @param logger - 可选日志。
+ * @returns 实际注册成功的命令名数组（便于真机断言）。
+ */
+export function registerCommands(runtime, engine, logger) {
+  const done = []
+  if (runtime === undefined || typeof runtime.register !== 'function') return done
+  for (const spec of COMMANDS) {
+    try {
+      runtime.register({
+        name: spec.name,
+        description: spec.description,
+        input: { hint: '工作区路径或显示标题' },
+        handler: async (invocation) => {
+          const value = await engine.manualWorkspace({
+            query: invocation?.rawInput,
+            action: spec.action
+          })
+          if (value?.ok === false) return { kind: 'error', text: renderManualResult(value) }
+          return { kind: 'success', text: renderManualResult(value) }
+        }
+      })
+      done.push(spec.name)
+    } catch (error) {
+      logger?.warn?.(`workspace-archive: 命令 /${spec.name} 注册失败：${String(error)}`)
+    }
+  }
+  return done
+}
+
+/**
  * 装载插件：载入台账、立即对账一次，然后**事件驱动**（注册表变更事件 + 目录 watcher），
  * 外加一个低频兜底轮询防漏。
  * @param ctx - Cordis 上下文（需要 `workspaceRegistry`；`logger`、`timer` 可选）。
@@ -501,6 +752,12 @@ export function apply(ctx, config) {
   const resolved = resolveConfig(config)
   const registry = ctx?.workspaceRegistry
   if (registry === undefined) throw new Error('workspace-archive: 缺少 workspaceRegistry 服务')
+  /**
+   * 宿主日志器。**必须在这里取成局部变量**：`armTools` / `armCommands` 的 catch 里要用它 ——
+   * 之前直接写裸 `logger` 会抛 `ReferenceError`，而那个错恰好被它们自己的 try/catch 吞掉，
+   * 表现是"命令静默没注册"（2026-10-11 由真机装置抓到）。
+   */
+  const logger = ctx?.logger
 
   const ledger = new LedgerStore(resolveLedgerPath(resolved, ctx))
   const engine = createEngine({ registry, ledger, config: resolved, logger: ctx?.logger })
@@ -542,11 +799,51 @@ export function apply(ctx, config) {
     else arm(ctx)
   }
 
+  /**
+   * 「手动归档工作区」的模型可见工具（F020）。
+   *
+   * `tools` 是**可选**服务：用 `ctx.inject` 等它；缺了就不注册工具，归档/恢复的其余能力照常。
+   * 定义是手写的（见 `defineManualTool` 的说明）—— 为了不 import 宿主包、保住零依赖硬约束。
+   */
+  const armTools = (scope) => {
+    const tools = typeof scope?.get === 'function' ? scope.get('tools') : undefined
+    if (tools === undefined || typeof tools.register !== 'function') return
+    try {
+      tools.register(defineManualTool(engine))
+    } catch (error) {
+      // 工具注册失败**绝不能拖垮插件**：归档/恢复的其余能力与它无关。
+      logger?.warn?.(`workspace-archive: workspace_archive 工具注册失败（其余能力不受影响）：${String(error)}`)
+    }
+  }
+  if (typeof ctx?.inject === 'function') ctx.inject(['tools'], armTools)
+  else armTools(ctx)
+
+  /**
+   * 「手动归档工作区」的**斜杠命令**入口（F021）：`/archive-workspace`、`/restore-workspace`。
+   *
+   * 同样是**可选**服务；纯宿主侧，不需要客户端半边（发现与渲染由官方 `dsh-client-ui-commands` 负责）。
+   */
+  const armCommands = (scope) => {
+    const commands = typeof scope?.get === 'function' ? scope.get('commands') : undefined
+    if (commands === undefined) return
+    try {
+      const names = registerCommands(commands, engine, logger)
+      if (names.length > 0) logger?.info?.(`workspace-archive: 已注册命令 ${names.map((n) => `/${n}`).join(' ')}`)
+    } catch (error) {
+      // 命令注册失败**绝不能拖垮插件**。
+      logger?.warn?.(`workspace-archive: 命令注册失败（其余能力不受影响）：${String(error)}`)
+    }
+  }
+  if (typeof ctx?.inject === 'function') ctx.inject(['tools'], armTools)
+  else armTools(ctx)
+  if (typeof ctx?.inject === 'function') ctx.inject(['commands'], armCommands)
+  else armCommands(ctx)
+
   // 卸载时关掉 watcher。
   if (typeof ctx?.effect === 'function') ctx.effect(() => () => engine.dispose(), 'workspace-archive.watchers')
   else if (typeof ctx?.on === 'function') ctx.on('dispose', () => engine.dispose())
 
-  ctx?.logger?.info?.(
+  logger?.info?.(
     'workspace-archive: 已装载（事件驱动 + 兜底轮询）'
       + ` confirmDelayMs=${resolved.confirmDelayMs}`
       + ` watch=${resolved.watch}`
