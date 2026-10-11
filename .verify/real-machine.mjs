@@ -411,21 +411,22 @@ try {
     { sessionIds: rowMap[renameWs.id]?.sessionIds }
   )
 
-  // ⚠️ 核心发现（2026-10-11 实测）：改名**不会**立刻让插件归档。
+  // ⚠️ F023（2026-10-11 已修）：改名也必须把插件叫醒，并在同一窗口内归档。
+  // 修之前这里断言的是相反的（"missingSince 仍是 null / 还没归档"）—— 那正是被复现出来的缺陷。
   const entryAfterRename = (await readJson(ledgerFile)).workspaces[renameWs.path.toLowerCase()]
   check(
-    '改名后：台账里这条工作区**已经记过** ⇒ "没归档"不是因为它没被跟踪',
+    '改名后：台账里这条工作区**已经记过**（前置条件，否则下面的判断没有意义）',
     (entryAfterRename?.sessionIds ?? []).includes(renameSession),
     { sessionIds: entryAfterRename?.sessionIds }
   )
   check(
-    '⚠️ 改名后：台账 missingSince 仍是 null ⇒ 插件**没被叫醒**（这是直接证据）',
-    entryAfterRename !== undefined && entryAfterRename.missingSince === null,
+    '改名后：台账已写下这次缺失 ⇒ 插件**被叫醒了**（F023 修复点：watcher 给的是新名字，也认）',
+    typeof entryAfterRename?.missingSince === 'string',
     { missingSince: entryAfterRename?.missingSince }
   )
   check(
-    '改名后：因此这条会话此刻**还没有**被归档（对照：阶段 3–5 已实测"删目录"会在同一窗口内归档）',
-    new Set((await readJson(registryFile)).global.archivedSessionIds ?? []).has(renameSession) === false,
+    '改名后：**在同一窗口内归档** —— 与"删目录"行为一致（修之前这条 FAIL：要等兜底轮询）',
+    new Set((await readJson(registryFile)).global.archivedSessionIds ?? []).has(renameSession) === true,
     { renameSession }
   )
 
@@ -457,7 +458,7 @@ try {
 
   await sleep(POLL_WAIT_MS)
   check(
-    '被 domain/changed 叫醒之后：插件**立刻**把它归档了 ⇒ 缺的只是"醒来"，判据本身没问题',
+    '把它当新工作区重新添加之后：归档态**保持不变** ⇒ 重绑新路径不会顺手把历史放出来（C 必须自己决定这一步）',
     new Set((await readJson(registryFile)).global.archivedSessionIds ?? []).has(renameSession) === true
   )
 

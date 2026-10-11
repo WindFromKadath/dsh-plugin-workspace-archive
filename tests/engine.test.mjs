@@ -503,3 +503,115 @@ test('确认窗口的跟进对账：窗口到点会自己再跑一轮（否则�
   await new Promise((resolve) => setTimeout(resolve, 10))
   assert.deepEqual(world.state.calls, [], '跟进时若仍在窗口内则不动作')
 })
+
+/** 轮询等一个条件成立（比固定 sleep 稳，慢机器上也不会假红）。 */
+async function waitFor(predicate, timeoutMs = 1500) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate() === true) return true
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  return predicate() === true
+}
+
+/**
+ * F023 回归：**改文件夹名**时 watcher 给的 filename 是**新名字**，不在被跟踪的名字集合里。
+ * 旧实现直接丢弃该事件 ⇒ 插件不被叫醒 ⇒ 要等兜底轮询（默认 5 分钟）才归档，
+ * 与"删目录"（filename 恰是旧名字，立刻归档）行为不一致。
+ */
+test('F023：改文件夹名（事件给的是新名字）也必须把插件叫醒并归档', async () => {
+  const world = fakeWorld()
+  const listeners = []
+  const watch = (_parent, _options, listener) => {
+    listeners.push(listener)
+    return { close() {}, on() {} }
+  }
+  const { engine } = await makeEngine(world, {}, { watch, timers: { setTimeout, clearTimeout } })
+
+  await engine.tick() // 健康一轮 → 装上父目录 watcher
+  assert.equal(listeners.length, 1, '应为一个父目录装上一个 watcher')
+
+  // 用户在资源管理器里改名：旧路径没了，而事件的 filename 是**新名字**。
+  world.state.exists = false
+  listeners[0]('rename', 'proj-renamed')
+
+  assert.ok(
+    await waitFor(() => world.state.calls.some(([kind]) => kind === 'archive')),
+    `改名后必须被叫醒并归档，实测 calls=${JSON.stringify(world.state.calls)}`
+  )
+  assert.deepEqual(world.state.calls, [['archive', 's1'], ['archive', 's2']])
+})
+
+/**
+ * F023 的反例：父目录里出现**无关**条目时，不得把它放大成高频对账。
+ * 允许做一次"存活探测"（stat），但目录仍在 ⇒ 不应归档、不应多余动作。
+ */
+test('F023：父目录里出现无关条目时不动作，但确实做了存活探测', async () => {
+  const world = fakeWorld()
+  const listeners = []
+  const watch = (_parent, _options, listener) => {
+    listeners.push(listener)
+    return { close() {}, on() {} }
+  }
+  const probed = []
+  const statDirectory = async (path) => {
+    probed.push(path)
+    return true // 目录一直都在
+  }
+  const { engine } = await makeEngine(world, {}, { watch, statDirectory, timers: { setTimeout, clearTimeout } })
+
+  await engine.tick()
+  world.state.calls.length = 0
+  probed.length = 0
+
+  listeners[0]('rename', 'something-unrelated')
+  await new Promise((resolve) => setTimeout(resolve, 200))
+
+  assert.deepEqual(world.state.calls, [], '不得因为无关条目就动任何会话')
+  assert.deepEqual(probed, ['<repo>\\proj'], '只对该父目录下被跟踪的 path 做一次 stat')
+})
+
+/**
+ * F023 的第二个隐患：watcher 只建一次，而旧实现的闭包捕获的是**建立时**的名字快照
+ * ⇒ 之后新增（或换名）的同一父目录下工作区，按名字永远命中不了。
+ */
+test('F023：watcher 装好之后新增的工作区，按它的名字也要能命中（且不重建 watcher）', async () => {
+  const world = fakeWorld()
+  const listeners = []
+  const watch = (_parent, _options, listener) => {
+    listeners.push(listener)
+    return { close() {}, on() {} }
+  }
+  const { engine } = await makeEngine(world, {}, { watch, timers: { setTimeout, clearTimeout } })
+
+  await engine.tick() // 建立 watcher，此刻只知道 `proj`
+  assert.equal(listeners.length, 1)
+
+  // 之后又添加了一个**同一父目录**下的工作区，再对账一次
+  let twinExists = true
+  const baseList = world.registry.list
+  world.registry.list = () => [
+    ...baseList(),
+    {
+      id: 'ws-2',
+      path: '<repo>\\proj2',
+      title: 'proj2',
+      get sessionIds() {
+        return twinExists ? ['s9'] : []
+      },
+      status: async () => (twinExists ? 'ok' : 'missing-dir'),
+      async attachSession() {}
+    }
+  ]
+  await engine.tick() // reconcile 应把 `proj2` 加进名字集合
+
+  twinExists = false
+  world.state.calls.length = 0
+  listeners[0]('rename', 'proj2')
+
+  assert.ok(
+    await waitFor(() => world.state.calls.some(([kind, id]) => kind === 'archive' && id === 's9')),
+    `刷新过的名字集合应能命中新工作区，实测 calls=${JSON.stringify(world.state.calls)}`
+  )
+  assert.equal(listeners.length, 1, '不应重建 watcher（重建会丢事件、也浪费句柄）')
+})

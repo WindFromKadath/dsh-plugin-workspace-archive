@@ -45,6 +45,12 @@
   - **真机装置已升级**：`.verify/rm/cordis.yml` 加挂 `@deepseek-ai/dsh-commands`；`real-machine.mjs` **阶段 7** = 3 条对照（分别证明*查询路径* / *定义形状* / *inject 接线*可用）+ 6 条断言（命令已注册、命令真能归档、真能恢复、未知工作区返回 error）。**排查手法值得复用**：先加对照证明**工具链**可用，再断言**我们的产物**存在 —— 否则分不清"我们没注册"与"查询方式不对"。
   - **🟡 未验证**：desktop GUI 输入框的命令弹窗是否真的列出这两条。装置无客户端/UI；契约上由 `dsh-client-ui-commands` 从宿主注册表取（`TypertRemoteService`），但**没有实测**，只能在重启后的 desktop 里验。
   - **真机装置对 `tools` 的缺口仍在**：`commands` 已挂，**`tools` 没挂** ⇒ `workspace_archive` 工具在真机里不注册，它的契约由 `tests/tool.test.mjs` 用宿主自己的校验器覆盖。要补上需给装置再加一行 `@deepseek-ai/dsh-tools`（待办）。
+- **watcher 必须认「未知 filename」**（F023，2026-10-11 **已修**）：`fs.watch` 在**改文件夹名**时给的 `filename` 是**新名字**，而被跟踪的名字集合里只有旧名字。旧实现 `names.has(changed)` 直接丢弃该事件 ⇒ **插件不被叫醒** ⇒ 改名后要等兜底轮询（默认 5 分钟）才归档，与"删目录"（filename 恰是旧名字、立刻归档）行为不一致。
+  - **真机实测**：修前台账 `missingSince` 是 `null`（没被叫醒）、该窗口内不归档；修后是时间戳 + 同一窗口内归档。**这同时证明**了根因 —— 修复只在"事件确实带着未知名字到达"时才可能生效。
+  - **修法**：未知 filename 时只做一次**合并存活探测**（`schedulePresenceProbe` → 对该父目录下被跟踪的 path 各一次 `statDirectory`），**有缺失才** `notifyChange()`。只 stat、不触发对账、不写盘，所以父目录里出现无关条目不会被放大成高频对账（反例用例断言"无关条目 ⇒ 0 次动作、恰 1 次 stat"）。
+  - ⚠️ **不能**简单改成"任何事件都 `notifyChange()`"：父目录（例：`D:\Coding\PersonalAction\`）下别的项目一有动静就会对账，而 `tick` 在无归档动作时**也会 `ledger.save()`**（`src/index.js:555`）⇒ 变成高频写盘。
+  - **顺带修掉的第二个隐患**：watcher 只建一次，旧实现闭包捕获的是**建立时**的名字快照 ⇒ 之后新增/换名的同一父目录下工作区，按名字永远命中不了。现在 `watched` 每次 reconcile **整体替换**、闭包**每次事件重新取** ⇒ 不重建 watcher 也能立刻生效。
+  - 证据：单元 `tests/engine.test.mjs` 3 项（**先红后绿** 78/81 → 81/81）；真机阶段 8 的预期**反过来**（修前断言"missingSince 是 null / 还没归档"，修后断言"被叫醒 + 同窗口内归档"）—— **51/51**。
 - **「注册表成员数 ≠ 侧栏可见行数」—— 别再重查**（2026-10-11 实测）：一个工作区可以攒下很多**空白会话**（点过「+」/ 新建过会话但**从没发过话**），侧栏按官方规则**不画**它们。`dsh-api-session-controller` 里 `SessionListMetadata.blank` 的定义是 *"Whether the folded prefix contains **no turn**"*；客户端契约明写 *"**lists hide blank sessions**"* 与 *"browser shows **only the selected blank entry**"*（`client/sessions/lineage.d.ts:16-20`、`service.d.ts:33-35`）。
   - 实例（用户 2026-10-11 报"`已归档 8/8`，可侧栏只有 4 行"）：`Rust` 工作区注册表 **8** 个成员 = 4 条真对话（21-22 事件 / 15.7–16.1 KB / 末尾 `session/end-seed` / 有首条用户消息）+ **4 条空白会话**（**恰好 4 事件 / 319-326 字节 / 末尾 `approval/policy` / 无用户消息**）⇒ 侧栏正好 4 行，且 4 个标题逐字对上。
   - 后果：本插件报的 `已归档 N/N` 里 N 是**成员数**，会比侧栏行数大。**行为正确、零损失**（空白会话本就不可见）。

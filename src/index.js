@@ -188,6 +188,14 @@ export function createEngine(deps) {
   const seenRegistered = new Set()
   /** parentDir → fs.FSWatcher。 */
   const watchers = new Map()
+  /**
+   * parentDir → `{ names, paths }`：该父目录下被跟踪的名字（小写 basename）与**完整路径**。
+   *
+   * ⚠️ 每次 reconcile 都**整体替换**这一项，而 watcher 闭包**每次事件都重新从 map 里取** ——
+   * 所以后来新增/换名的工作区立刻生效（旧实现把名字集合快照捕进闭包，永远只有建立时那批，见 F023）。
+   */
+  const watched = new Map()
+  let probeTimer = null
   let pendingTick = null
   let confirmTimer = null
   let disposed = false
@@ -436,23 +444,39 @@ export function createEngine(deps) {
     for (const path of paths) {
       const parent = dirname(path)
       const name = basename(path).toLowerCase()
-      if (!wanted.has(parent)) wanted.set(parent, new Set())
-      wanted.get(parent).add(name)
+      if (!wanted.has(parent)) wanted.set(parent, { names: new Set(), paths: new Set() })
+      wanted.get(parent).names.add(name)
+      wanted.get(parent).paths.add(path)
     }
-    for (const [parent, watcher] of watchers) {
+    for (const [parent, watcher] of [...watchers]) {
       if (wanted.has(parent)) continue
       try {
         watcher.close()
       } catch { /* 关闭失败无所谓 */ }
       watchers.delete(parent)
+      watched.delete(parent)
     }
-    for (const [parent, names] of wanted) {
+    // ② **已监听的父目录也要刷新**名字簿。旧实现这里直接 `continue`，于是闭包永远拿着
+    //    "建立 watcher 那一刻"的快照 —— 之后新增/换名的同一父目录下工作区，按名字再也命中不了。
+    //    watcher 闭包每次事件都重新从 `watched` 取，所以整体替换是安全的，不必重建 watcher。
+    for (const [parent, state] of wanted) watched.set(parent, state)
+    // ③ 给还没监听的父目录建 watcher
+    for (const parent of wanted.keys()) {
       if (watchers.has(parent)) continue
       try {
         const watcher = watchImpl(parent, { persistent: false }, (_eventType, filename) => {
+          const live = watched.get(parent)
+          if (live === undefined) return
           // filename 为空时（部分平台/网络盘）保守地当作相关变化处理。
           const changed = typeof filename === 'string' ? filename.toLowerCase() : undefined
-          if (changed === undefined || names.has(changed)) notifyChange()
+          if (changed === undefined || live.names.has(changed)) {
+            void notifyChange()
+            return
+          }
+          // ⚠️ 未知 filename（F023）：**改文件夹名**时 `fs.watch` 给的是**新名字**，不在被跟踪的
+          // 名字集合里；旧实现直接丢弃 ⇒ 插件不被叫醒 ⇒ 要等兜底轮询（默认 5 分钟）才归档，
+          // 与"删目录"（filename 恰是旧名字、立刻归档）行为不一致。
+          schedulePresenceProbe()
         })
         watcher.on?.('error', (error) => {
           logger?.warn?.(`workspace-archive: 目录监听失效，退回兜底轮询（${parent}）：${String(error)}`)
@@ -460,10 +484,40 @@ export function createEngine(deps) {
             watcher.close()
           } catch { /* 已经坏了 */ }
           watchers.delete(parent)
+          watched.delete(parent)
         })
         watchers.set(parent, watcher)
       } catch (error) {
         logger?.warn?.(`workspace-archive: 无法监听 ${parent}，退回兜底轮询：${String(error)}`)
+      }
+    }
+  }
+
+  /**
+   * 未知 filename 的合并存活探测（F023）。
+   *
+   * 语义：这个父目录里有个"我不认识的名字"动了 —— 那会不会是**我跟踪的某个目录被改名走了**？
+   * 只对"该父目录下被跟踪的 path"各做一次 `statDirectory`：**不触发对账、不写盘**，
+   * 所以父目录里出现无关条目时的代价是一次 stat，而不是一轮对账 + 一次台账落盘。
+   */
+  function schedulePresenceProbe() {
+    if (disposed || probeTimer !== null) return
+    probeTimer = timers.setTimeout(() => {
+      probeTimer = null
+      void probeTrackedPresence()
+    }, changeDelayMs)
+    probeTimer?.unref?.()
+  }
+
+  /** 逐条探测被跟踪的 path；只要有一条已经不在了就唤醒对账（走正常的确认窗口）。 */
+  async function probeTrackedPresence() {
+    if (disposed) return
+    for (const state of watched.values()) {
+      for (const path of state.paths) {
+        if ((await statDirectory(path)) === false) {
+          void notifyChange()
+          return
+        }
       }
     }
   }
@@ -475,12 +529,17 @@ export function createEngine(deps) {
       timers.clearTimeout(confirmTimer)
       confirmTimer = null
     }
+    if (probeTimer !== null) {
+      timers.clearTimeout(probeTimer)
+      probeTimer = null
+    }
     for (const watcher of watchers.values()) {
       try {
         watcher.close()
       } catch { /* 已经坏了 */ }
     }
     watchers.clear()
+    watched.clear()
   }
 
   /**
