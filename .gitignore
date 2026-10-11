@@ -18,6 +18,11 @@ tests/.tmp/
 .verify/home/
 .verify/proj/
 .verify/demo-ws/
+# 真实会话日志的测试夹具（由 .verify/fixture-real-sessions.mjs 复制而来）
+# ⚠️ 里面是**用户真实对话内容**，绝不入库。
+.verify/fixtures/
+# 离线迁移工具的一次性产物
+.verify/migrate-out/
 
 # 文件权限修复的记录与撤销脚本（本机一次性产物，2026-10-07）
 .verify/acl-recovery/

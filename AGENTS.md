@@ -51,6 +51,14 @@
   - ⚠️ **不能**简单改成"任何事件都 `notifyChange()`"：父目录（例：`D:\Coding\PersonalAction\`）下别的项目一有动静就会对账，而 `tick` 在无归档动作时**也会 `ledger.save()`**（`src/index.js:555`）⇒ 变成高频写盘。
   - **顺带修掉的第二个隐患**：watcher 只建一次，旧实现闭包捕获的是**建立时**的名字快照 ⇒ 之后新增/换名的同一父目录下工作区，按名字永远命中不了。现在 `watched` 每次 reconcile **整体替换**、闭包**每次事件重新取** ⇒ 不重建 watcher 也能立刻生效。
   - 证据：单元 `tests/engine.test.mjs` 3 项（**先红后绿** 78/81 → 81/81）；真机阶段 8 的预期**反过来**（修前断言"missingSince 是 null / 还没归档"，修后断言"被叫醒 + 同窗口内归档"）—— **51/51**。
+- **离线迁移引擎（B / F022）的帧层事实 —— 已实测，别再重查**（2026-10-11，代码在 `offline/frames.js`）：
+  - **header 独占第 0 帧**：`session.v4.jsonl.zstd`（325 字节）= 帧 0 = 178B，**就是 header 那一行**；帧 1 = 147B，3 条事件 ⇒「只改第 0 帧、其余字节原样」可落地。
+  - **官方 zstd 参数是流式**：`createZstdCompress` + `ZSTD_c_windowLog: 21` + `ZSTD_c_checksumFlag: 1` + 默认 level。**一次性 `zstdCompressSync` 复现不出来** —— 它的窗口描述符是 `0x00`（windowLog=10），官方是 `0x58`（windowLog=21）。改对流式后 **8/8 真实会话的第 0 帧逐字节相同**。
+  - **`projectKey(cwd)` / `encodeSegment(id)` / `sessionFormatLogFilename(version)`** 照抄官方（逐行出处见 `offline/frames.js` 头注释）；并用「真实夹具目录名 == `projectKey(header.cwd)`」在**真数据**上自证。
+  - **改 cwd 必须连目录一起搬**：`projectDir = join(root, projectKey(cwd))`、`locate` 取 `logPath(root, meta.cwd, meta.id, …)` ⇒ 只改 header 不搬目录，官方在新路径下**找不到日志**。
+  - **强性质**：新 cwd 与旧 cwd **等长 ⇒ 整个文件字节数不变**；第 0 帧之后的字节一律原样保留。改写内置三重自检（替换后可解析且 `cwd` 正确 / 重压帧能独立解回那一行 / 仍只有一行），任何一条不过即 **fail-closed**。
+  - 证据：单元 **117/117**（`tests/offline-frames.test.mjs` 8 条合成 + `tests/offline-real-fixture.test.mjs` 25 条真数据）；真机未跑（这一段零写入）。
+  - ⚠️ 夹具 `.verify/fixtures/` 里是**用户真实对话内容**：**已 gitignore，绝不入库**；由 `.verify/fixture-real-sessions.mjs` 从 `~/.dsh/sessions/` **复制**而来（源目录只读）。
 - **「注册表成员数 ≠ 侧栏可见行数」—— 别再重查**（2026-10-11 实测）：一个工作区可以攒下很多**空白会话**（点过「+」/ 新建过会话但**从没发过话**），侧栏按官方规则**不画**它们。`dsh-api-session-controller` 里 `SessionListMetadata.blank` 的定义是 *"Whether the folded prefix contains **no turn**"*；客户端契约明写 *"**lists hide blank sessions**"* 与 *"browser shows **only the selected blank entry**"*（`client/sessions/lineage.d.ts:16-20`、`service.d.ts:33-35`）。
   - 实例（用户 2026-10-11 报"`已归档 8/8`，可侧栏只有 4 行"）：`Rust` 工作区注册表 **8** 个成员 = 4 条真对话（21-22 事件 / 15.7–16.1 KB / 末尾 `session/end-seed` / 有首条用户消息）+ **4 条空白会话**（**恰好 4 事件 / 319-326 字节 / 末尾 `approval/policy` / 无用户消息**）⇒ 侧栏正好 4 行，且 4 个标题逐字对上。
   - 后果：本插件报的 `已归档 N/N` 里 N 是**成员数**，会比侧栏行数大。**行为正确、零损失**（空白会话本就不可见）。

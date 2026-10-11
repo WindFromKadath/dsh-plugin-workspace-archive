@@ -5,7 +5,8 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync, existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { apply, inject, isActiveSessionRefusal, name, resolveConfig, resolveDshHome } from '../src/index.js'
@@ -43,11 +44,30 @@ test('loader 契约：name / inject 形态正确，且**不导出** schemastery 
 test('回归：插件源码不得 import 宿主包（否则 junction 装载会 ERR_MODULE_NOT_FOUND）', () => {
   // 真机教训：profile 里用 junction 指向本仓库时，Node 按真实路径解析嵌套 import，
   // 够不到宿主的 @deepseek-ai/*，插件在 DSH 里直接装载失败（组合正常、模块加载报错）。
-  for (const file of ['src/index.js', 'src/ledger.js', 'src/policy.js']) {
-    const source = readFileSync(fileURLToPath(new URL(file, root)), 'utf8')
+  //
+  // 扫**全部** .js，而不是硬编码名单 —— 硬编码漏掉过 `src/manual.js` / `src/adopt.js`，
+  // 而这类"新文件没被纳入回归"的漏网正是零依赖纪律最容易被悄悄破掉的地方。
+  const roots = ['src', 'offline']
+  const files = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) walk(full)
+      else if (entry.name.endsWith('.js')) files.push(full)
+    }
+  }
+  for (const dir of roots) {
+    const full = fileURLToPath(new URL(dir, root))
+    if (existsSync(full)) walk(full)
+  }
+  assert.ok(files.length >= 4, `至少要扫到 src/ 下的几个文件，实测 ${files.length}`)
+
+  for (const file of files) {
+    const source = readFileSync(file, 'utf8')
     const bare = source.match(/from\s+'(@?[^.'][^']*)'/g) ?? []
     const external = bare.filter((clause) => /from\s+'(?!node:)/.test(clause))
-    assert.deepEqual(external, [], `${file} 只允许 node: 内置模块与相对路径 import`)
+    const label = file.replace(fileURLToPath(root), '').replace(/\\/g, '/')
+    assert.deepEqual(external, [], `${label} 只允许 node: 内置模块与相对路径 import`)
   }
 })
 
