@@ -19,23 +19,30 @@
  */
 
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 import { applyPlan, probeDshRunning, rollback } from '../offline/apply.js'
 import { buildPlan, describePlan } from '../offline/plan.js'
+import { describeSessions, listSessions } from '../offline/catalog.js'
 
 const USAGE = `用法：
-  node bin/dsh-session-migrate.mjs plan     --from <cwd> --to <cwd> [选项]
-  node bin/dsh-session-migrate.mjs apply    --from <cwd> --to <cwd> --backup <dir> --i-have-stopped-dsh [选项]
+  node bin/dsh-session-migrate.mjs list     [--sessions <root>] [--cwd <路径>] [--all] [--json]
+  node bin/dsh-session-migrate.mjs plan     --to <cwd> [--from <cwd>] --session <id> [选项]
+  node bin/dsh-session-migrate.mjs apply    --to <cwd> [--from <cwd>] --session <id> --backup <dir> --i-have-stopped-dsh
   node bin/dsh-session-migrate.mjs rollback --backup <dir>
 
 公共选项：
-  --from <cwd>        源 cwd（会话当前所属的工作区路径）
-  --to <cwd>          目标 cwd（必须是一个**已存在**的目录）
-  --sessions <root>   sessions 根（默认 $DSH_HOME/sessions 或 ~/.dsh/sessions）
+  --to <cwd>          目标 cwd（必须是一个**已存在**、且**已登记为工作区**的目录）
+  --from <cwd>        源 cwd。**可以省略**：只给一个 --session 时，源 cwd 由那条会话
+                      自己的 header 决定 —— 这就是"手动迁移单个对话"的入口
   --session <id>      只处理这条会话（可重复）
+  --sessions <root>   sessions 根（默认 $DSH_HOME/sessions 或 ~/.dsh/sessions）
   --json              输出 JSON
   --help              显示本帮助
+
+list 选项：
+  --cwd <路径>        只看这个工作区路径下的会话
+  --all               连"空白会话"一起列出（官方侧栏默认不画它们）
 
 apply 额外要求：
   --backup <dir>            备份根目录（**必填**，不设默认值，避免悄悄写到意料之外的地方）
@@ -45,17 +52,21 @@ apply 额外要求：
 apply 成功后会在意图文件里记下"这些会话现在属于新路径了"。**重启 DSH 后**，插件读到它就会用官方
 attachSession 把它们挂到新工作区的分组里（依然只走官方 API，不直写 storages/）。
 
+⚠️ 必须先**完全退出** DSH —— 官方 registry 有 header 内存缓存，活着的进程会一直读到旧的 cwd。
+
 退出码：0 成功 / 2 被拒绝或被阻塞 / 1 用法或内部错误`
 
 function parseArgs(argv) {
   const options = {
-    sessions: null, from: null, to: null, backup: null, intent: null,
-    only: [], json: false, help: false, stopped: false
+    sessions: null, from: null, to: null, backup: null, intent: null, cwd: null,
+    only: [], json: false, help: false, stopped: false, all: false
   }
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index]
     if (arg === '--help' || arg === '-h') options.help = true
     else if (arg === '--json') options.json = true
+    else if (arg === '--all') options.all = true
+    else if (arg === '--cwd') options.cwd = argv[++index]
     else if (arg === '--i-have-stopped-dsh') options.stopped = true
     else if (arg === '--from') options.from = argv[++index]
     else if (arg === '--to') options.to = argv[++index]
@@ -99,7 +110,7 @@ async function main(argv) {
     console.log(USAGE)
     return 0
   }
-  if (['plan', 'apply', 'rollback'].includes(subcommand) === false) {
+  if (['list', 'plan', 'apply', 'rollback'].includes(subcommand) === false) {
     console.error(`未知子命令：${subcommand}\n\n${USAGE}`)
     return 1
   }
@@ -107,6 +118,30 @@ async function main(argv) {
   const options = parseArgs(rest)
   if (options.help) {
     console.log(USAGE)
+    return 0
+  }
+
+  // ── list：只读列出会话，让用户认出要迁的那条对话 ─────────
+  if (subcommand === 'list') {
+    const sessionsRoot = resolve(options.sessions ?? defaultSessionsRoot())
+    const sessions = await listSessions({
+      sessionsRoot,
+      // 标题与"空白会话"位都在官方投影缓存里（只读）。拿不到就显示"(没有标题)"，不影响列出。
+      projCacheRoot: join(dirname(sessionsRoot), 'storages', 'session_projcache'),
+      cwd: options.cwd
+    })
+    const visible = options.all ? sessions : sessions.filter((item) => item.blank !== true)
+    report(
+      options,
+      { sessionsRoot, total: sessions.length, shown: visible.length, sessions: visible },
+      [
+        `会话（${visible.length} 条${options.all ? '' : `，已隐藏 ${sessions.length - visible.length} 条空白会话（--all 可显示）`}）：`,
+        describeSessions(visible),
+        '',
+        '迁移其中一条：',
+        '  node bin/dsh-session-migrate.mjs plan --session <上面那个 id> --to <目标工作区路径>'
+      ].join('\n')
+    )
     return 0
   }
 
@@ -127,8 +162,9 @@ async function main(argv) {
     return result.ok === true ? 0 : 2
   }
 
-  if (options.from === null || options.to === null) {
-    console.error(`${subcommand} 需要 --from 与 --to\n\n${USAGE}`)
+  // `--from` 可以省：只给一个 `--session` 时，源 cwd 由那条会话自己的 header 决定。
+  if (options.to === null || (options.from === null && options.only.length !== 1)) {
+    console.error(`${subcommand} 需要 --to，并且要么给 --from，要么只给一个 --session\n\n${USAGE}`)
     return 1
   }
 

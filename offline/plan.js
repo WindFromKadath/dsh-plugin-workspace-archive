@@ -13,9 +13,11 @@
  */
 
 import { readdir, readFile, stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
-import { projectKey, readHeader, rewriteHeaderCwd, scanFrames, sessionLogFilename } from './frames.js'
+import { projectKey, readHeader, readHeaderPrefix, rewriteHeaderCwd, scanFrames, sessionLogFilename } from './frames.js'
+import { pathKey } from '../src/ledger.js'
+import { locateSession } from './catalog.js'
 
 /** 判断一个路径是不是存在的目录。 */
 async function isDirectory(path) {
@@ -23,6 +25,32 @@ async function isDirectory(path) {
     return (await stat(path)).isDirectory()
   } catch {
     return false
+  }
+}
+
+/** 默认的注册表文件：`sessions/` 的兄弟目录 `storages/workspace.json`。 */
+export function defaultRegistryPath(sessionsRoot) {
+  return join(dirname(sessionsRoot), 'storages', 'workspace.json')
+}
+
+/**
+ * 读**已登记工作区的路径集合**（只读官方 `storages/workspace.json`）。
+ *
+ * 为什么必须查它：离线层只做"改 cwd + 搬目录"，把会话挂进工作区成员表只能由插件的在线层做，
+ * 而在线层要求**目标路径已经登记为工作区**。不查的话，用户可以白跑一整趟离线迁移，
+ * 结果是"会话不见了、而且工具没说为什么"。
+ * @param registryPath - 注册表文件路径。
+ * @returns 归一化路径集合；读不到返回 `null`（**未知 ≠ 不存在**，此时不拦，由在线层兜住）。
+ */
+export async function readRegisteredPaths(registryPath) {
+  if (typeof registryPath !== 'string' || registryPath.length === 0) return null
+  try {
+    const value = JSON.parse(await readFile(registryPath, 'utf8'))
+    const rows = value?.tables?.workspaces
+    if (rows === null || typeof rows !== 'object') return null
+    return new Set(Object.values(rows).map((row) => pathKey(row?.path ?? '')))
+  } catch {
+    return null
   }
 }
 
@@ -115,7 +143,7 @@ export async function collectSessions(sessionsRoot, cwd) {
  * @returns 计划对象（可直接 JSON 序列化）。
  */
 export async function buildPlan(options) {
-  const { sessionsRoot, fromCwd, toCwd } = options
+  const { sessionsRoot, toCwd } = options
   const only = options.only === undefined ? null : new Set(options.only)
 
   const blockers = []
@@ -123,10 +151,45 @@ export async function buildPlan(options) {
   const targetExists = await isDirectory(toCwd)
   if (targetExists === false) blockers.push(`target-cwd-is-not-an-existing-directory (${toCwd})`)
 
-  const sourceProjectDir = join(sessionsRoot, projectKey(fromCwd))
+  // 目标必须是**已登记的工作区**：离线层只改 cwd + 搬目录，把会话挂进成员表要靠在线层的
+  // 官方 `attachSession`，而它要求目标路径已经登记。不查的话用户会白跑一趟，
+  // 结果是"会话不见了、而且工具没说为什么"。
+  const registered = await readRegisteredPaths(options.registryPath ?? defaultRegistryPath(sessionsRoot))
+  const targetRegistered = registered === null ? null : registered.has(pathKey(toCwd))
+  if (targetRegistered === false) {
+    blockers.push(`target-cwd-is-not-a-registered-workspace (${toCwd}) —— 先在 DSH 里把该目录添加为工作区`)
+  }
+
+  // `--from` 可以省：给了 `--session` 就由**会话自己的 header** 说了算。
+  // 这正是"手动迁移单个对话"的入口 —— 用户不必先知道它属于哪个 cwd。
+  let fromCwd = options.fromCwd ?? null
+  let fromCwdSource = 'argument'
+  if (fromCwd === null || fromCwd.length === 0) {
+    if (only === null || only.size !== 1) {
+      blockers.push('need--from-or-exactly-one--session')
+      fromCwd = ''
+    } else {
+      const sessionId = [...only][0]
+      const found = await locateSession(sessionsRoot, sessionId)
+      const header = found === null ? null : await readHeaderPrefix(found.logPath)
+      if (found === null) {
+        blockers.push(`session-not-found (${sessionId})`)
+        fromCwd = ''
+      } else if (header.ok !== true) {
+        blockers.push(`session-header-unreadable: ${header.reason}`)
+        fromCwd = ''
+      } else {
+        fromCwd = header.header.cwd
+        fromCwdSource = 'session-header'
+      }
+    }
+  }
+
+  const resolvable = typeof fromCwd === 'string' && fromCwd.length > 0
+  const sourceProjectDir = resolvable ? join(sessionsRoot, projectKey(fromCwd)) : null
   const targetProjectDir = join(sessionsRoot, projectKey(toCwd))
-  const sourceExists = await isDirectory(sourceProjectDir)
-  if (sourceExists === false) blockers.push(`source-project-dir-missing (${projectKey(fromCwd)})`)
+  const sourceExists = sourceProjectDir !== null && await isDirectory(sourceProjectDir)
+  if (resolvable && sourceExists === false) blockers.push(`source-project-dir-missing (${projectKey(fromCwd)})`)
 
   const collected = sourceExists ? await collectSessions(sessionsRoot, fromCwd) : { entries: [] }
   // 计划是**工作单元**：只要全局有阻塞，逐条一律标 blocked —— 否则写入层照 `action === 'move'`
@@ -141,7 +204,7 @@ export async function buildPlan(options) {
     const dstLogPath = entry.logFile === null ? null : join(dstSessionDir, entry.logFile)
 
     if (await isDirectory(dstSessionDir)) blocks.push('target-session-dir-already-exists')
-    if (projectKey(fromCwd) === projectKey(toCwd)) blocks.push('source-and-target-project-key-are-identical')
+    if (resolvable && projectKey(fromCwd) === projectKey(toCwd)) blocks.push('source-and-target-project-key-are-identical')
 
     // 试改一次（**在内存里**，不落盘）：任何一条过不了自检就阻塞。
     let rewrite = null
@@ -176,11 +239,15 @@ export async function buildPlan(options) {
   return {
     ok: blockers.length === 0 && movable === sessions.length && sessions.length > 0,
     sessionsRoot,
-    fromCwd,
+    fromCwd: resolvable ? fromCwd : null,
+    /** `argument` = 来自 `--from`；`session-header` = 由 `--session` 那条会话自己的 header 里读出来的。 */
+    fromCwdSource,
     toCwd,
     sourceProjectDir,
     targetProjectDir,
     targetExists,
+    /** `true`/`false` = 查过注册表；`null` = 注册表读不到（未知，不拦）。 */
+    targetRegistered,
     blockers,
     sessions,
     summary: { total: sessions.length, movable, blocked: sessions.length - movable }

@@ -31,6 +31,7 @@
  */
 
 import { constants, createZstdCompress, zstdDecompressSync } from 'node:zlib'
+import { open } from 'node:fs/promises'
 
 /** zstd 帧 magic。 */
 export const ZSTD_MAGIC = Object.freeze([0x28, 0xb5, 0x2f, 0xfd])
@@ -288,6 +289,36 @@ export async function rewriteHeaderCwd(buffer, newCwd) {
     changed: true,
     frame0OriginalBytes: frameEnd,
     frame0RewrittenBytes: frame0.length
+  }
+}
+
+/**
+ * 只读日志**开头**若干字节来拿 header —— 避免为了读一行 header 把整份日志读进内存。
+ *
+ * 第 0 帧是一个独立的 zstd 帧，所以只要它整个落在前缀里就能完整解出来；超出前缀
+ * （极罕见：cwd 长到几千字节）时返回 `header-exceeds-prefix`，交给调用方决定要不要整份读。
+ * @param logPath - 日志文件路径。
+ * @param maxBytes - 最多读多少字节（默认 64 KiB）。
+ * @returns 与 `readHeader` 同形。
+ */
+export async function readHeaderPrefix(logPath, maxBytes = 65536) {
+  let handle
+  try {
+    handle = await open(logPath, 'r')
+  } catch (error) {
+    return { ok: false, reason: `open-failed: ${String(error)}` }
+  }
+  try {
+    const buffer = Buffer.alloc(maxBytes)
+    const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0)
+    const prefix = buffer.subarray(0, bytesRead)
+    const frameEnd = firstFrameEnd(prefix)
+    if (frameEnd < 0) return { ok: false, reason: 'header-exceeds-prefix' }
+    return readHeader(prefix.subarray(0, frameEnd))
+  } catch (error) {
+    return { ok: false, reason: `prefix-read-failed: ${String(error)}` }
+  } finally {
+    await handle.close().catch(() => {})
   }
 }
 
