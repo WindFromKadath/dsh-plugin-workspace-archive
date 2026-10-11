@@ -59,6 +59,9 @@
   - **强性质**：新 cwd 与旧 cwd **等长 ⇒ 整个文件字节数不变**；第 0 帧之后的字节一律原样保留。改写内置三重自检（替换后可解析且 `cwd` 正确 / 重压帧能独立解回那一行 / 仍只有一行），任何一条不过即 **fail-closed**。
   - 证据：单元 **117/117**（`tests/offline-frames.test.mjs` 8 条合成 + `tests/offline-real-fixture.test.mjs` 25 条真数据）；真机未跑（这一段零写入）。
   - ⚠️ 夹具 `.verify/fixtures/` 里是**用户真实对话内容**：**已 gitignore，绝不入库**；由 `.verify/fixture-real-sessions.mjs` 从 `~/.dsh/sessions/` **复制**而来（源目录只读）。
+  - **写入层的安全顺序**（`offline/apply.js`）：备份（**任何改动之前**）→ 改写第 0 帧 → 写新（**临时文件 + 原子 `rename`**）→ 自检（目标 header 的 cwd 正确 / **第 0 帧之后的字节与源逐字节相同** / 事件行逐字相同）→ **最后才删源目录**。⇒ 任何一步失败**源都还在**。刻意**不**用"先删后写"，也**不**用跨目录 `rename`（跨盘会失败，且失败时源已不在原位）。
+  - **两道写入闸门**：① 显式 `--i-have-stopped-dsh`；② `--backup <dir>` **必填、无默认值**（避免悄悄写到意料之外的地方）。**刻意不做可靠存活探测**：`probeDshRunning()` 用 `tasklist` 且任何失败都返回 `'unknown'` —— 生态先例 `dsh-mv-session` 的 `detectLiveDsh()` 就是**静默失效**的；与其假装检查，不如要求人显式声明。实测在本机沙箱里它返回 `unknown`（沙箱禁止 Node 捕获子进程输出）。
+  - 证据：单元 **133/133**（新增 `tests/offline-apply.test.mjs` 8 条：闸门、全流程、回滚、回滚冲突、失败路径下源仍在、verify 反例）。**真实数据演练**（一次性副本，**不碰真实 `sessions/`**）：8 条真会话 plan → apply → 逐条复核「第 0 帧之后字节 8/8 相同、事件行 8/8 相同、header 的 cwd 已换」→ rollback → **8/8 文件哈希与基线完全一致**、源 project 恢复、目标 project 清空。
 - **「注册表成员数 ≠ 侧栏可见行数」—— 别再重查**（2026-10-11 实测）：一个工作区可以攒下很多**空白会话**（点过「+」/ 新建过会话但**从没发过话**），侧栏按官方规则**不画**它们。`dsh-api-session-controller` 里 `SessionListMetadata.blank` 的定义是 *"Whether the folded prefix contains **no turn**"*；客户端契约明写 *"**lists hide blank sessions**"* 与 *"browser shows **only the selected blank entry**"*（`client/sessions/lineage.d.ts:16-20`、`service.d.ts:33-35`）。
   - 实例（用户 2026-10-11 报"`已归档 8/8`，可侧栏只有 4 行"）：`Rust` 工作区注册表 **8** 个成员 = 4 条真对话（21-22 事件 / 15.7–16.1 KB / 末尾 `session/end-seed` / 有首条用户消息）+ **4 条空白会话**（**恰好 4 事件 / 319-326 字节 / 末尾 `approval/policy` / 无用户消息**）⇒ 侧栏正好 4 行，且 4 个标题逐字对上。
   - 后果：本插件报的 `已归档 N/N` 里 N 是**成员数**，会比侧栏行数大。**行为正确、零损失**（空白会话本就不可见）。
