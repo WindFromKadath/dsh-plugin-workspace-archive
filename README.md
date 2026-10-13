@@ -147,6 +147,10 @@ node bin/dsh-session-migrate.mjs rollback --backup <备份目录>
 - 不做会话删除、不删文件夹、不做跨机器同步。
 - 目录被**改名**等于换了一个路径：挂回时官方会校验 cwd，对不上时插件只记日志、不改数据。
 
+## 更新记录
+
+每个已发布版本的内容见 [CHANGELOG.md](CHANGELOG.md)。当前版本 `0.2.0`。
+
 ## 许可证
 
 MIT —— 见 [LICENSE](LICENSE)。

@@ -47,3 +47,6 @@ id_ed25519
 credentials.json
 auth.json
 settings.local.json
+
+# npm 在本仓库内的临时缓存（沙箱下日志目录不可写时的落点）
+.npm-cache/
