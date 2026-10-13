@@ -107,6 +107,12 @@
   - 归位后的会话进入下一轮健康台账快照，于是自动获得「目录消失→归档→回归→挂回」的保护。
   - 证据：单元 **48/48**（`tests/adopt.test.mjs` 7 项）；真机 **27/27**（装置阶段 1b 备料 + 阶段 6 断言），**先红后绿**（临时 `adoptUngrouped: false` → `FAIL T0 归位…` 26/27，还原后 27/27）。
 - **junction 装载的插件不能 `import` 宿主包**（本机踩实）：profile 里 `node_modules/<插件>` 是 junction 指向本仓库时，Node 按**真实路径**解析嵌套 import，从 `dsh-plugin-workspace-archive\` 往上走够不到 `profiles\node_modules`，于是 `@deepseek-ai/schemastery` 之类直接 `ERR_MODULE_NOT_FOUND`，插件在 DSH 里装载失败（组合层一切正常、只有模块加载报错，而且**应用没有可读日志**，只能靠"插件没跑"倒推）。两条出路：**① 插件零外部依赖**（本项目选的路，见 D009）；② 把包装进 profile 的 node_modules 树里（pnpm 安装/复制），让它能沿目录树往上解析。`dsh-launch-environment` 只是环境快照，**没有**模块解析钩子；`test/register.mjs` 的钩子只在本地测试进程里有效，app 进程没有它。
+- **生态规模与发现通道 —— 别再重复调研**（2026-10-13 实测，F017 结论）：
+  - 生态目录包 **`dsh-plugin-shop-catalog`** 从 npm **自动索引**（记录里 `source: npm` / `metadata: derived`），收录 **14,090** 个 DSH 插件。**本包在发布当天（2026-10-08）就被自动收录**，无需提交：`category: workflow` / `tier: community` / `publisher: windfromkadath` / `added: 2026-10-08`。数据在 tarball 的 `package/v1/plugins.<hash>.json`（14 MB）。
+  - **npm 关键词搜索不是发现通道**：`dsh-plugin` 返回 **288,767** 条而本包**不在前 50**；`dsh workspace archive` / `deepseek-harness` / `deepseek harness plugin` 同样搜不到。只有**精确包名**（第 1 位）与 `workspace archive`（第 2 位）能命中。⇒ 发现靠**目录包 + awesome 列表**（本仓库已提 awesome-dsh-plugin PR #6923，见 F018），**不要在 npm 搜索上投入**。
+  - 精确包名查询就能拿到最新版本 ⇒ **npm 侧索引没有滞后**（曾误以为有：其实是 `npm view` 的**本地元数据缓存**，核对发布状态要加 `--prefer-online`）。目录快照本身会滞后一两天（v2026.1012.1 记的还是 0.1.0）。
+  - ⚠️ 目录里的 star 数值**不能当 GitHub 星标读**（头部条目上到 8 万、中位数为 0，量级不合理）。本仓库自身：0 star / 0 watcher / 0 fork（2026-10-07 建）。
+  - 复核手法：`https://registry.npmjs.org/-/v1/search?text=<词>&size=50`；目录则 `npm pack dsh-plugin-shop-catalog` 后查 `package/v1/plugins.<hash>.json`。
 
 ## 危险操作边界（越界前必须先问用户）
 
