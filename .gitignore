@@ -50,3 +50,6 @@ settings.local.json
 
 # npm 在本仓库内的临时缓存（沙箱下日志目录不可写时的落点）
 .npm-cache/
+
+# 装置/发布过程中产生的临时 md（不属于仓库内容）
+.verify/*.md

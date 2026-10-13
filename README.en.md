@@ -76,9 +76,13 @@ Both suites are re-runnable and never touch a real profile or a real workspace f
 - **Archive and restore only know sessions they have recorded.** If the delete-and-re-add happens while the plugin is not running, it knows only the last snapshot in its ledger: members present in that snapshot are re-attached, older strays are not (the start-up adoption covers those whose `cwd` still equals the workspace path).
 - **Re-attaching is not unarchiving.** `attach` only touches the workspace member table; it never touches the archive set.
 - **Adoption runs once** (5 seconds after start-up): an orphan that appears later waits for the next restart.
-- **Cross-workspace migration is out of scope**: it would require offline rewriting of the session log, which has no official channel.
+- **Cross-workspace migration is not possible**: it would require offline rewriting of the session log (no official channel), and even then the official side exposes **no public entry point** to rebuild the session header it caches in memory — so a restart would be required for it to take effect. That is an **upstream capability gap**; this plugin does **not** provide that feature. The full exploration write-up (mechanism, measurements, why it cannot be done) is in [docs/plan-session-migration.md](docs/plan-session-migration.md) — that directory is **not published to npm**.
 - No session deletion, no folder deletion, no cross-machine sync.
 - A renamed folder is a different path: attaching re-validates the `cwd`, and the plugin only logs when it does not match.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md). Current version `0.2.0`.
 
 ## License
 

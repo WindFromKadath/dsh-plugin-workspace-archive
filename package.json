@@ -10,16 +10,11 @@
   },
   "files": [
     "src",
-    "offline",
-    "bin",
     "cordis.patch.yml",
     "README.md",
     "README.en.md",
     "CHANGELOG.md"
   ],
-  "bin": {
-    "dsh-session-migrate": "bin/dsh-session-migrate.mjs"
-  },
   "license": "MIT",
   "author": "WindFromKadath <294740142+WindFromKadath@users.noreply.github.com>",
   "repository": {
