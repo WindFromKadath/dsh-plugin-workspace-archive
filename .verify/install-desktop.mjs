@@ -198,10 +198,18 @@ if (desired === current) {
   console.log(current.includes(START) ? '已更新 patch 层的管理区域。' : '已在 patch 层追加管理区域（同 id 覆盖 config）。')
 }
 
-console.log(`
+const profileArg = argv.includes('--profile') ? ` --profile "${profileDir}"` : ''
+
+if (dryRun) {
+  console.log(`
+[dry-run] 以上只是**预演** —— 没有写任何文件。去掉 --dry-run 才会真正执行。
+`)
+} else {
+  console.log(`
 安装完成。检查清单：
   1. 重启 DSH（bundle / patch 变更不会被 HMR 热装载）。
   2. 设置 → 插件页的「已安装」应出现 ${PACKAGE_NAME}，开关为**已启用**。
   3. 装载自证：${ledgerFile} 会在第一轮对账后出现，并列出注册表里的工作区。
-  4. 回滚：node .verify/install-desktop.mjs --uninstall
+  4. 回滚：node .verify/install-desktop.mjs --uninstall${profileArg}
 `)
+}
